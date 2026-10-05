@@ -1,0 +1,6 @@
+Read @"docs\sources\A Philosophy of Software Design - John Ousterhout.pdf" understanding its principles as a
+  staff software engineer, summarize its most important concepts and actionables, and create a skill to use in a
+  future codebase in this folder. The skill must then assess and report whether the codebase is up to standards
+  according to the book material, and offer insight on how to fix/improve/refactor the problems or smells.
+
+  
