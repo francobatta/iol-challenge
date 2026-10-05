@@ -1,0 +1,30 @@
+# Local development only: the credentials below are placeholders, not secrets.
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: audience
+      POSTGRES_PASSWORD: audience
+      POSTGRES_DB: audience
+    ports:
+      - "5432:5432"
+    volumes:
+      # Loaded once, when the database is first created.
+      - ./api/db/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U audience -d audience"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  api:
+    build: ./api
+    environment:
+      DATABASE_URL: postgres://audience:audience@db:5432/audience
+      JWT_SECRET: dev-jwt-secret
+      ADMIN_KEY: dev-admin-key
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy

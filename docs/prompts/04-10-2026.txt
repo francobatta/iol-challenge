@@ -2,5 +2,46 @@ Read @"docs\sources\A Philosophy of Software Design - John Ousterhout.pdf" under
   staff software engineer, summarize its most important concepts and actionables, and create a skill to use in a
   future codebase in this folder. The skill must then assess and report whether the codebase is up to standards
   according to the book material, and offer insight on how to fix/improve/refactor the problems or smells.
+***
+Grab https://google.github.io/styleguide/go/, then download and parse all three:
+  https://google.github.io/styleguide/go/guide https://google.github.io/styleguide/go/decisions
+  https://google.github.io/styleguide/go/best-practices
 
+Summarize these constrains and design recommendations, and have them in a project-wide skill to
+  create, design, generate and validate go code. We will use the cc-skills-golang from samber, but these
+  three google golang style recommendations are top priority when developing in this codebase.
+***
+/clear
+***
+The task is to create a go REST API which will be a frontend (not in the UI sense, but the
+  API/contract sense) for a notifications service. For now, the notification registration and
+  sending flow is not to be coded.
+
+  First, let's add a user CRUD API plus the logic of clients (owners of users) and its relation.
+  The user entity will be comprised of:
+  app_id, user_id, created_at. PK is (app_id, user_id)
+  Each user may have one or more devices, ways to receive notifications or associated data to use
+  in each notification:
+  app_id, user_id, endpoint_id, address (string), channel, provider
+  where PK is (app_id, endpoint_id)
+
+  Each app has a unique ID and can create and own "lists of users" to send notifications in a
+  customizable way. Lists are an entity, ALWAYS associated with an app_id:
+  (app_id, list_id, name, description, created_at) where PK is (app_id, list_id)
+
+  and users 'enter' lists by the table:
+  list_members (app_id, list_id, user_id, added_at) where PK is (app_id, list_id, user_id)
   
+  To recap, the task is to create the REST API endpoints, handlers, services and repos (assume
+  postgres) for this requirement. Use go style, prefer simplicity and readability, and interview
+  me for gaps, ambiguities or potential assumptions.
+  ***
+  Each app authenticates to this application using a lightweight JWT (its api key) which
+     resolves to app_id accordingly
+***
+It looks right. Please spec, implement. Remember to use the style skill in this repo, KISS,
+  readability and simplicity first. Go!
+***
+Before continuing, let's have a folder encompassing everything named 'notification-system' and
+  then have this app in a folder named 'api'. The docker and docker compose semantics may differ,
+  and those may need to go in the project's main folder (notification-system rather than api)
