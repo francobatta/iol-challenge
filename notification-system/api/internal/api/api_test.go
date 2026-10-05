@@ -1,47 +1,43 @@
 package api
 
 import (
-	"bytes"
 	"encoding/json"
-	"fmt"
-	"io"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-cmp/cmp/cmpopts"
+	"go.uber.org/mock/gomock"
 
 	"github.com/francobatta/iol-challenge/notification-system/api/internal/audience"
 	"github.com/francobatta/iol-challenge/notification-system/api/internal/audience/audiencetest"
 	"github.com/francobatta/iol-challenge/notification-system/api/internal/token"
 )
 
-const testAdminKey = "admin-key"
+const (
+	testAdminKey = "admin-key"
+	testAppID    = "app-1"
+)
 
-// A client calls the API of a test server as one app.
+// A client calls a test server with the credentials it holds.
 type client struct {
-	baseURL string
-	token   string
+	baseURL  string
+	token    string
+	adminKey string
 }
 
-// call sends a request and returns the response status. A non-nil in is sent as the
-// JSON body and a non-nil out receives the decoded JSON response.
-func (c client) call(t *testing.T, method, path string, in, out any) int {
+// call sends a request and returns the response status. A non-empty body is sent as
+// it is, and a non-nil out receives the decoded JSON response.
+func (c client) call(t *testing.T, method, path, body string, out any) int {
 	t.Helper()
-	var body io.Reader
-	if in != nil {
-		data, err := json.Marshal(in)
-		if err != nil {
-			t.Fatalf("Setup: encoding the body of %s %s: %v", method, path, err)
-		}
-		body = bytes.NewReader(data)
-	}
-	req, err := http.NewRequestWithContext(t.Context(), method, c.baseURL+path, body)
+	req, err := http.NewRequestWithContext(t.Context(), method, c.baseURL+path, strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("Setup: building %s %s: %v", method, path, err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("X-Admin-Key", c.adminKey)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("%s %s failed: %v", method, path, err)
@@ -55,97 +51,357 @@ func (c client) call(t *testing.T, method, path string, in, out any) int {
 	return resp.StatusCode
 }
 
-// newTestServer starts the API over an empty in-memory store and returns its URL.
-func newTestServer(t *testing.T) string {
+// newTestAPI starts the API over a mock store. It returns a client holding a token
+// for testAppID, and the recorder on which a test states the store calls it expects.
+// Any other store call fails the test.
+func newTestAPI(t *testing.T) (client, *audiencetest.MockStoreMockRecorder) {
 	t.Helper()
 	tokens, err := token.NewSigner("test-secret")
 	if err != nil {
 		t.Fatalf("Setup: NewSigner failed: %v", err)
 	}
-	svc := audience.NewService(audiencetest.NewFake())
-	srv := httptest.NewServer(NewHandler(svc, tokens, testAdminKey))
+	tok, err := tokens.Issue(testAppID)
+	if err != nil {
+		t.Fatalf("Setup: Issue(%q) failed: %v", testAppID, err)
+	}
+	store := audiencetest.NewMockStore(gomock.NewController(t))
+	srv := httptest.NewServer(NewHandler(audience.NewService(store), tokens, testAdminKey))
 	t.Cleanup(srv.Close)
-	return srv.URL
+	return client{baseURL: srv.URL, token: tok}, store.EXPECT()
 }
 
-// createApp registers an app with the admin key and returns the response.
-func createApp(t *testing.T, baseURL, adminKey, name string) (status int, token string) {
-	t.Helper()
-	body := bytes.NewBufferString(fmt.Sprintf(`{"name": %q}`, name))
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, baseURL+"/v1/apps", body)
-	if err != nil {
-		t.Fatalf("Setup: building POST /v1/apps: %v", err)
-	}
-	req.Header.Set("X-Admin-Key", adminKey)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("POST /v1/apps failed: %v", err)
-	}
-	defer resp.Body.Close()
-	var app struct {
-		Token string `json:"token"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&app); err != nil {
-		t.Fatalf("POST /v1/apps: decoding the %d response: %v", resp.StatusCode, err)
-	}
-	return resp.StatusCode, app.Token
-}
+func TestStatus(t *testing.T) {
+	ctx := gomock.Any()
+	var (
+		ana   = audience.User{ID: "ana"}
+		email = audience.Endpoint{ID: "e1", UserID: "ana", Address: "ana@example.com", Channel: audience.ChannelEmail, Provider: "ses"}
+		beta  = audience.List{ID: "l1", Name: "beta", Description: "early access"}
+	)
+	const emailBody = `{"address": "ana@example.com", "channel": "email", "provider": "ses"}`
 
-// newTestApp starts a server and returns a client for a freshly created app.
-func newTestApp(t *testing.T) client {
-	t.Helper()
-	baseURL := newTestServer(t)
-	status, tok := createApp(t, baseURL, testAdminKey, "test app")
-	if status != http.StatusCreated {
-		t.Fatalf("Setup: POST /v1/apps = %d, want %d", status, http.StatusCreated)
+	tests := []struct {
+		name               string
+		method, path, body string
+		expect             func(store *audiencetest.MockStoreMockRecorder)
+		want               int
+	}{
+		{
+			name: "RegisterNewUser", method: "PUT", path: "/v1/users/ana",
+			expect: func(store *audiencetest.MockStoreMockRecorder) {
+				store.PutUser(ctx, testAppID, "ana").Return(ana, true, nil)
+			},
+			want: http.StatusCreated,
+		},
+		{
+			name: "RegisterExistingUser", method: "PUT", path: "/v1/users/ana",
+			expect: func(store *audiencetest.MockStoreMockRecorder) {
+				store.PutUser(ctx, testAppID, "ana").Return(ana, false, nil)
+			},
+			want: http.StatusOK,
+		},
+		{
+			name: "RegisterUserWithTooLongID", method: "PUT", path: "/v1/users/" + strings.Repeat("a", audience.MaxUserIDLen+1),
+			want: http.StatusBadRequest,
+		},
+		{
+			name: "GetUser", method: "GET", path: "/v1/users/ana",
+			expect: func(store *audiencetest.MockStoreMockRecorder) {
+				store.User(ctx, testAppID, "ana").Return(ana, nil)
+			},
+			want: http.StatusOK,
+		},
+		{
+			name: "GetUnknownUser", method: "GET", path: "/v1/users/ana",
+			expect: func(store *audiencetest.MockStoreMockRecorder) {
+				store.User(ctx, testAppID, "ana").Return(audience.User{}, audience.ErrNotFound)
+			},
+			want: http.StatusNotFound,
+		},
+		{
+			name: "StoreFailure", method: "GET", path: "/v1/users/ana",
+			expect: func(store *audiencetest.MockStoreMockRecorder) {
+				store.User(ctx, testAppID, "ana").Return(audience.User{}, errors.New("database is down"))
+			},
+			want: http.StatusInternalServerError,
+		},
+		{
+			name: "DeleteUser", method: "DELETE", path: "/v1/users/ana",
+			expect: func(store *audiencetest.MockStoreMockRecorder) {
+				store.DeleteUser(ctx, testAppID, "ana").Return(nil)
+			},
+			want: http.StatusNoContent,
+		},
+		{
+			name: "DeleteUnknownUser", method: "DELETE", path: "/v1/users/ana",
+			expect: func(store *audiencetest.MockStoreMockRecorder) {
+				store.DeleteUser(ctx, testAppID, "ana").Return(audience.ErrNotFound)
+			},
+			want: http.StatusNotFound,
+		},
+
+		{
+			name: "CreateEndpoint", method: "POST", path: "/v1/users/ana/endpoints", body: emailBody,
+			expect: func(store *audiencetest.MockStoreMockRecorder) {
+				store.CreateEndpoint(ctx, testAppID, audience.Endpoint{
+					UserID: "ana", Address: "ana@example.com", Channel: audience.ChannelEmail, Provider: "ses",
+				}).Return(email, nil)
+			},
+			want: http.StatusCreated,
+		},
+		{
+			name: "CreateEndpointForUnknownUser", method: "POST", path: "/v1/users/ana/endpoints", body: emailBody,
+			expect: func(store *audiencetest.MockStoreMockRecorder) {
+				store.CreateEndpoint(ctx, testAppID, gomock.Any()).Return(audience.Endpoint{}, audience.ErrNotFound)
+			},
+			want: http.StatusNotFound,
+		},
+		{
+			name: "CreateDuplicateEndpoint", method: "POST", path: "/v1/users/ana/endpoints", body: emailBody,
+			expect: func(store *audiencetest.MockStoreMockRecorder) {
+				store.CreateEndpoint(ctx, testAppID, gomock.Any()).Return(audience.Endpoint{}, audience.ErrConflict)
+			},
+			want: http.StatusConflict,
+		},
+		{
+			name: "CreateEndpointWithUnknownChannel", method: "POST", path: "/v1/users/ana/endpoints",
+			body: `{"address": "x", "channel": "fax", "provider": "p"}`,
+			want: http.StatusBadRequest,
+		},
+		{
+			name: "CreateEndpointWithoutAddress", method: "POST", path: "/v1/users/ana/endpoints",
+			body: `{"channel": "sms", "provider": "p"}`,
+			want: http.StatusBadRequest,
+		},
+		{
+			name: "CreateEndpointWithoutProvider", method: "POST", path: "/v1/users/ana/endpoints",
+			body: `{"address": "x", "channel": "sms"}`,
+			want: http.StatusBadRequest,
+		},
+		{
+			name: "CreateEndpointWithUnknownField", method: "POST", path: "/v1/users/ana/endpoints",
+			body: `{"address": "x", "channel": "sms", "provider": "p", "extra": 1}`,
+			want: http.StatusBadRequest,
+		},
+		{
+			name: "CreateEndpointWithMalformedBody", method: "POST", path: "/v1/users/ana/endpoints",
+			body: `{"address": `,
+			want: http.StatusBadRequest,
+		},
+		{
+			name: "GetEndpoint", method: "GET", path: "/v1/endpoints/e1",
+			expect: func(store *audiencetest.MockStoreMockRecorder) {
+				store.Endpoint(ctx, testAppID, "e1").Return(email, nil)
+			},
+			want: http.StatusOK,
+		},
+		{
+			name: "ListEndpointsOfUnknownUser", method: "GET", path: "/v1/users/ana/endpoints",
+			expect: func(store *audiencetest.MockStoreMockRecorder) {
+				store.User(ctx, testAppID, "ana").Return(audience.User{}, audience.ErrNotFound)
+			},
+			want: http.StatusNotFound,
+		},
+		{
+			name: "UpdateEndpoint", method: "PATCH", path: "/v1/endpoints/e1", body: `{"provider": "sendgrid"}`,
+			expect: func(store *audiencetest.MockStoreMockRecorder) {
+				// Only the provider changes; the other fields keep their stored values.
+				updated := email
+				updated.Provider = "sendgrid"
+				store.Endpoint(ctx, testAppID, "e1").Return(email, nil)
+				store.UpdateEndpoint(ctx, testAppID, updated).Return(updated, nil)
+			},
+			want: http.StatusOK,
+		},
+		{
+			name: "UpdateEndpointToUnknownChannel", method: "PATCH", path: "/v1/endpoints/e1", body: `{"channel": "fax"}`,
+			expect: func(store *audiencetest.MockStoreMockRecorder) {
+				store.Endpoint(ctx, testAppID, "e1").Return(email, nil)
+			},
+			want: http.StatusBadRequest,
+		},
+		{
+			name: "UpdateUnknownEndpoint", method: "PATCH", path: "/v1/endpoints/e1", body: `{"address": "x"}`,
+			expect: func(store *audiencetest.MockStoreMockRecorder) {
+				store.Endpoint(ctx, testAppID, "e1").Return(audience.Endpoint{}, audience.ErrNotFound)
+			},
+			want: http.StatusNotFound,
+		},
+		{
+			name: "DeleteEndpoint", method: "DELETE", path: "/v1/endpoints/e1",
+			expect: func(store *audiencetest.MockStoreMockRecorder) {
+				store.DeleteEndpoint(ctx, testAppID, "e1").Return(nil)
+			},
+			want: http.StatusNoContent,
+		},
+
+		{
+			name: "CreateList", method: "POST", path: "/v1/lists", body: `{"name": "beta", "description": "early access"}`,
+			expect: func(store *audiencetest.MockStoreMockRecorder) {
+				store.CreateList(ctx, testAppID, audience.List{Name: "beta", Description: "early access"}).Return(beta, nil)
+			},
+			want: http.StatusCreated,
+		},
+		{
+			name: "CreateListWithoutName", method: "POST", path: "/v1/lists", body: `{"description": "early access"}`,
+			want: http.StatusBadRequest,
+		},
+		{
+			name: "CreateListWithTakenName", method: "POST", path: "/v1/lists", body: `{"name": "beta"}`,
+			expect: func(store *audiencetest.MockStoreMockRecorder) {
+				store.CreateList(ctx, testAppID, gomock.Any()).Return(audience.List{}, audience.ErrConflict)
+			},
+			want: http.StatusConflict,
+		},
+		{
+			name: "GetList", method: "GET", path: "/v1/lists/l1",
+			expect: func(store *audiencetest.MockStoreMockRecorder) {
+				store.List(ctx, testAppID, "l1").Return(beta, nil)
+			},
+			want: http.StatusOK,
+		},
+		{
+			name: "UpdateList", method: "PATCH", path: "/v1/lists/l1", body: `{"name": "testers"}`,
+			expect: func(store *audiencetest.MockStoreMockRecorder) {
+				// Only the name changes; the description keeps its stored value.
+				updated := beta
+				updated.Name = "testers"
+				store.List(ctx, testAppID, "l1").Return(beta, nil)
+				store.UpdateList(ctx, testAppID, updated).Return(updated, nil)
+			},
+			want: http.StatusOK,
+		},
+		{
+			name: "UpdateListToEmptyName", method: "PATCH", path: "/v1/lists/l1", body: `{"name": ""}`,
+			expect: func(store *audiencetest.MockStoreMockRecorder) {
+				store.List(ctx, testAppID, "l1").Return(beta, nil)
+			},
+			want: http.StatusBadRequest,
+		},
+		{
+			name: "DeleteList", method: "DELETE", path: "/v1/lists/l1",
+			expect: func(store *audiencetest.MockStoreMockRecorder) {
+				store.DeleteList(ctx, testAppID, "l1").Return(nil)
+			},
+			want: http.StatusNoContent,
+		},
+
+		{
+			name: "AddMember", method: "PUT", path: "/v1/lists/l1/members/ana",
+			expect: func(store *audiencetest.MockStoreMockRecorder) {
+				store.List(ctx, testAppID, "l1").Return(beta, nil)
+				store.KnownUsers(ctx, testAppID, []string{"ana"}).Return([]string{"ana"}, nil)
+				store.AddMembers(ctx, testAppID, "l1", []string{"ana"}).Return(nil)
+			},
+			want: http.StatusNoContent,
+		},
+		{
+			name: "AddUnknownUserAsMember", method: "PUT", path: "/v1/lists/l1/members/ana",
+			expect: func(store *audiencetest.MockStoreMockRecorder) {
+				store.List(ctx, testAppID, "l1").Return(beta, nil)
+				store.KnownUsers(ctx, testAppID, []string{"ana"}).Return(nil, nil)
+			},
+			want: http.StatusNotFound,
+		},
+		{
+			name: "AddMemberToUnknownList", method: "PUT", path: "/v1/lists/l1/members/ana",
+			expect: func(store *audiencetest.MockStoreMockRecorder) {
+				store.List(ctx, testAppID, "l1").Return(audience.List{}, audience.ErrNotFound)
+			},
+			want: http.StatusNotFound,
+		},
+		{
+			name: "AddMembers", method: "POST", path: "/v1/lists/l1/members", body: `{"user_ids": ["ana", "bob"]}`,
+			expect: func(store *audiencetest.MockStoreMockRecorder) {
+				store.List(ctx, testAppID, "l1").Return(beta, nil)
+				store.KnownUsers(ctx, testAppID, []string{"ana", "bob"}).Return([]string{"ana", "bob"}, nil)
+				store.AddMembers(ctx, testAppID, "l1", []string{"ana", "bob"}).Return(nil)
+			},
+			want: http.StatusNoContent,
+		},
+		{
+			name: "AddNoMembers", method: "POST", path: "/v1/lists/l1/members", body: `{"user_ids": []}`,
+			want: http.StatusBadRequest,
+		},
+		{
+			name: "RemoveMember", method: "DELETE", path: "/v1/lists/l1/members/ana",
+			expect: func(store *audiencetest.MockStoreMockRecorder) {
+				store.RemoveMember(ctx, testAppID, "l1", "ana").Return(nil)
+			},
+			want: http.StatusNoContent,
+		},
+		{
+			name: "ListMembersOfUnknownList", method: "GET", path: "/v1/lists/l1/members",
+			expect: func(store *audiencetest.MockStoreMockRecorder) {
+				store.List(ctx, testAppID, "l1").Return(audience.List{}, audience.ErrNotFound)
+			},
+			want: http.StatusNotFound,
+		},
 	}
-	return client{baseURL: baseURL, token: tok}
-}
-
-// A step is one request of a scripted exchange and the status it must produce.
-type step struct {
-	method, path string
-	body         any
-	want         int
-}
-
-func runSteps(t *testing.T, c client, steps []step) {
-	t.Helper()
-	for _, s := range steps {
-		if got := c.call(t, s.method, s.path, s.body, nil); got != s.want {
-			t.Errorf("%s %s with body %v = %d, want %d", s.method, s.path, s.body, got, s.want)
-		}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			c, store := newTestAPI(t)
+			if test.expect != nil {
+				test.expect(store)
+			}
+			if got := c.call(t, test.method, test.path, test.body, nil); got != test.want {
+				t.Errorf("%s %s with body %q = %d, want %d", test.method, test.path, test.body, got, test.want)
+			}
+		})
 	}
 }
-
-type object = map[string]any
 
 func TestCreateApp(t *testing.T) {
-	baseURL := newTestServer(t)
+	c, store := newTestAPI(t)
+	c.adminKey = testAdminKey
+	c.token = ""
+	store.CreateApp(gomock.Any(), "my app").Return(audience.App{ID: "app-2", Name: "my app"}, nil)
 
-	if status, _ := createApp(t, baseURL, "wrong-key", "app"); status != http.StatusUnauthorized {
-		t.Errorf("POST /v1/apps with a wrong admin key = %d, want %d", status, http.StatusUnauthorized)
+	var created struct {
+		AppID string `json:"app_id"`
+		Name  string `json:"name"`
+		Token string `json:"token"`
 	}
-	if status, _ := createApp(t, baseURL, testAdminKey, ""); status != http.StatusBadRequest {
-		t.Errorf("POST /v1/apps with an empty name = %d, want %d", status, http.StatusBadRequest)
+	if got := c.call(t, "POST", "/v1/apps", `{"name": "my app"}`, &created); got != http.StatusCreated {
+		t.Fatalf("POST /v1/apps = %d, want %d", got, http.StatusCreated)
+	}
+	if created.AppID != "app-2" || created.Name != "my app" {
+		t.Errorf("POST /v1/apps = %+v, want app_id %q and name %q", created, "app-2", "my app")
 	}
 
-	status, tok := createApp(t, baseURL, testAdminKey, "app")
-	if status != http.StatusCreated {
-		t.Fatalf("POST /v1/apps = %d, want %d", status, http.StatusCreated)
-	}
-	c := client{baseURL: baseURL, token: tok}
-	if got := c.call(t, "GET", "/v1/users", nil, nil); got != http.StatusOK {
+	// The returned token must act as the new app: the store is asked for app-2's users.
+	store.Users(gomock.Any(), "app-2", gomock.Any()).Return(nil, nil)
+	asApp := client{baseURL: c.baseURL, token: created.Token}
+	if got := asApp.call(t, "GET", "/v1/users", "", nil); got != http.StatusOK {
 		t.Errorf("GET /v1/users with the token of the new app = %d, want %d", got, http.StatusOK)
 	}
 }
 
+func TestCreateAppRejects(t *testing.T) {
+	tests := []struct {
+		name     string
+		adminKey string
+		body     string
+		want     int
+	}{
+		{name: "a missing admin key", adminKey: "", body: `{"name": "app"}`, want: http.StatusUnauthorized},
+		{name: "a wrong admin key", adminKey: "wrong", body: `{"name": "app"}`, want: http.StatusUnauthorized},
+		{name: "an empty name", adminKey: testAdminKey, body: `{"name": ""}`, want: http.StatusBadRequest},
+	}
+	for _, test := range tests {
+		c, _ := newTestAPI(t)
+		c.adminKey = test.adminKey
+		if got := c.call(t, "POST", "/v1/apps", test.body, nil); got != test.want {
+			t.Errorf("POST /v1/apps with %s = %d, want %d", test.name, got, test.want)
+		}
+	}
+}
+
 func TestRequestsWithoutValidTokenAreRejected(t *testing.T) {
-	c := newTestApp(t)
+	c, _ := newTestAPI(t)
 	for _, tok := range []string{"", "garbage", c.token + "x"} {
 		bad := client{baseURL: c.baseURL, token: tok}
 		var got errorBody
-		status := bad.call(t, "GET", "/v1/users", nil, &got)
+		status := bad.call(t, "GET", "/v1/users", "", &got)
 		if status != http.StatusUnauthorized || got.Error.Code != "unauthorized" {
 			t.Errorf("GET /v1/users with token %q = %d, code %q, want %d, code %q",
 				tok, status, got.Error.Code, http.StatusUnauthorized, "unauthorized")
@@ -153,209 +409,115 @@ func TestRequestsWithoutValidTokenAreRejected(t *testing.T) {
 	}
 }
 
-func TestAppsCannotSeeEachOthersData(t *testing.T) {
-	a := newTestApp(t)
-	_, tok := createApp(t, a.baseURL, testAdminKey, "other app")
-	b := client{baseURL: a.baseURL, token: tok}
-
-	runSteps(t, a, []step{{method: "PUT", path: "/v1/users/ana", want: http.StatusCreated}})
-	runSteps(t, b, []step{
-		{method: "GET", path: "/v1/users/ana", want: http.StatusNotFound},
-		{method: "DELETE", path: "/v1/users/ana", want: http.StatusNotFound},
-		// The same ID is a different user in another app.
-		{method: "PUT", path: "/v1/users/ana", want: http.StatusCreated},
-	})
-}
-
-func TestUsers(t *testing.T) {
-	c := newTestApp(t)
-	runSteps(t, c, []step{
-		{method: "GET", path: "/v1/users/ana", want: http.StatusNotFound},
-		{method: "PUT", path: "/v1/users/ana", want: http.StatusCreated},
-		{method: "PUT", path: "/v1/users/ana", want: http.StatusOK},
-		{method: "GET", path: "/v1/users/ana", want: http.StatusOK},
-		{method: "DELETE", path: "/v1/users/ana", want: http.StatusNoContent},
-		{method: "GET", path: "/v1/users/ana", want: http.StatusNotFound},
-		{method: "DELETE", path: "/v1/users/ana", want: http.StatusNotFound},
-	})
-}
-
 func TestPaging(t *testing.T) {
-	c := newTestApp(t)
-	for _, id := range []string{"c", "a", "b"} {
-		if got := c.call(t, "PUT", "/v1/users/"+id, nil, nil); got != http.StatusCreated {
-			t.Fatalf("Setup: PUT /v1/users/%s = %d, want %d", id, got, http.StatusCreated)
-		}
-	}
-
 	type page struct {
 		Items     []audience.User `json:"items"`
 		NextAfter string          `json:"next_after"`
 	}
-	ignoreTimes := cmpopts.IgnoreFields(audience.User{}, "CreatedAt")
+	a, b, c := audience.User{ID: "a"}, audience.User{ID: "b"}, audience.User{ID: "c"}
+
+	// The store is always asked for one user more than the page holds, and that extra
+	// user, when it comes back, is what produces next_after.
 	tests := []struct {
-		path string
-		want page
+		name      string
+		path      string
+		wantAsked audience.Page
+		stored    []audience.User
+		want      page
 	}{
-		{path: "/v1/users?limit=2", want: page{Items: []audience.User{{ID: "a"}, {ID: "b"}}, NextAfter: "b"}},
-		{path: "/v1/users?limit=2&after=b", want: page{Items: []audience.User{{ID: "c"}}}},
-		{path: "/v1/users?limit=3", want: page{Items: []audience.User{{ID: "a"}, {ID: "b"}, {ID: "c"}}}},
-		{path: "/v1/users?after=c", want: page{Items: []audience.User{}}},
+		{
+			name: "DefaultLimit", path: "/v1/users",
+			wantAsked: audience.Page{Limit: defaultPageSize + 1},
+			stored:    []audience.User{a, b},
+			want:      page{Items: []audience.User{a, b}},
+		},
+		{
+			name: "MorePagesFollow", path: "/v1/users?limit=2",
+			wantAsked: audience.Page{Limit: 3},
+			stored:    []audience.User{a, b, c},
+			want:      page{Items: []audience.User{a, b}, NextAfter: "b"},
+		},
+		{
+			name: "LastPage", path: "/v1/users?limit=2&after=b",
+			wantAsked: audience.Page{After: "b", Limit: 3},
+			stored:    []audience.User{c},
+			want:      page{Items: []audience.User{c}},
+		},
+		{
+			name: "Empty", path: "/v1/users?after=c",
+			wantAsked: audience.Page{After: "c", Limit: defaultPageSize + 1},
+			stored:    nil,
+			want:      page{Items: []audience.User{}},
+		},
 	}
 	for _, test := range tests {
-		var got page
-		if status := c.call(t, "GET", test.path, nil, &got); status != http.StatusOK {
-			t.Errorf("GET %s = %d, want %d", test.path, status, http.StatusOK)
-			continue
-		}
-		if diff := cmp.Diff(test.want, got, ignoreTimes); diff != "" {
-			t.Errorf("GET %s returned unexpected diff (-want +got):\n%s", test.path, diff)
-		}
-	}
+		t.Run(test.name, func(t *testing.T) {
+			cl, store := newTestAPI(t)
+			store.Users(gomock.Any(), testAppID, test.wantAsked).Return(test.stored, nil)
 
-	for _, limit := range []string{"0", "201", "x"} {
+			var got page
+			if status := cl.call(t, "GET", test.path, "", &got); status != http.StatusOK {
+				t.Fatalf("GET %s = %d, want %d", test.path, status, http.StatusOK)
+			}
+			if diff := cmp.Diff(test.want, got); diff != "" {
+				t.Errorf("GET %s returned unexpected diff (-want +got):\n%s", test.path, diff)
+			}
+		})
+	}
+}
+
+func TestPagingRejectsBadLimits(t *testing.T) {
+	c, _ := newTestAPI(t)
+	for _, limit := range []string{"0", "201", "-1", "x"} {
 		path := "/v1/users?limit=" + limit
-		if got := c.call(t, "GET", path, nil, nil); got != http.StatusBadRequest {
+		if got := c.call(t, "GET", path, "", nil); got != http.StatusBadRequest {
 			t.Errorf("GET %s = %d, want %d", path, got, http.StatusBadRequest)
 		}
 	}
 }
 
-func TestEndpoints(t *testing.T) {
-	c := newTestApp(t)
-	email := object{"address": "ana@example.com", "channel": "email", "provider": "ses"}
-	runSteps(t, c, []step{
-		{method: "POST", path: "/v1/users/ana/endpoints", body: email, want: http.StatusNotFound},
-		{method: "GET", path: "/v1/users/ana/endpoints", want: http.StatusNotFound},
-		{method: "PUT", path: "/v1/users/ana", want: http.StatusCreated},
-		{method: "POST", path: "/v1/users/ana/endpoints", body: object{"address": "x", "channel": "fax", "provider": "p"}, want: http.StatusBadRequest},
-		{method: "POST", path: "/v1/users/ana/endpoints", body: object{"address": "", "channel": "sms", "provider": "p"}, want: http.StatusBadRequest},
-		{method: "POST", path: "/v1/users/ana/endpoints", body: object{"address": "x", "channel": "sms"}, want: http.StatusBadRequest},
-		{method: "POST", path: "/v1/users/ana/endpoints", body: object{"unknown": 1}, want: http.StatusBadRequest},
-	})
+func TestEndpointBody(t *testing.T) {
+	c, store := newTestAPI(t)
+	want := audience.Endpoint{ID: "e1", UserID: "ana", Address: "+5491100000000", Channel: audience.ChannelSMS, Provider: "twilio"}
+	store.Endpoint(gomock.Any(), testAppID, "e1").Return(want, nil)
 
-	var created audience.Endpoint
-	if got := c.call(t, "POST", "/v1/users/ana/endpoints", email, &created); got != http.StatusCreated {
-		t.Fatalf("POST /v1/users/ana/endpoints = %d, want %d", got, http.StatusCreated)
+	var got map[string]any
+	if status := c.call(t, "GET", "/v1/endpoints/e1", "", &got); status != http.StatusOK {
+		t.Fatalf("GET /v1/endpoints/e1 = %d, want %d", status, http.StatusOK)
 	}
-	want := audience.Endpoint{ID: created.ID, UserID: "ana", Address: "ana@example.com", Channel: audience.ChannelEmail, Provider: "ses"}
-	if diff := cmp.Diff(want, created); diff != "" || created.ID == "" {
-		t.Errorf("POST /v1/users/ana/endpoints returned ID %q and unexpected diff (-want +got):\n%s", created.ID, diff)
+	wantBody := map[string]any{
+		"endpoint_id": "e1",
+		"user_id":     "ana",
+		"address":     "+5491100000000",
+		"channel":     "sms",
+		"provider":    "twilio",
 	}
-
-	path := "/v1/endpoints/" + created.ID
-	var updated audience.Endpoint
-	if got := c.call(t, "PATCH", path, object{"provider": "sendgrid"}, &updated); got != http.StatusOK {
-		t.Fatalf("PATCH %s = %d, want %d", path, got, http.StatusOK)
+	if diff := cmp.Diff(wantBody, got); diff != "" {
+		t.Errorf("GET /v1/endpoints/e1 returned unexpected diff (-want +got):\n%s", diff)
 	}
-	want.Provider = "sendgrid"
-	if diff := cmp.Diff(want, updated); diff != "" {
-		t.Errorf("PATCH %s returned unexpected diff (-want +got):\n%s", path, diff)
-	}
-
-	runSteps(t, c, []step{
-		{method: "POST", path: "/v1/users/ana/endpoints", body: email, want: http.StatusConflict},
-		{method: "PATCH", path: path, body: object{"channel": "fax"}, want: http.StatusBadRequest},
-		{method: "PATCH", path: "/v1/endpoints/missing", body: object{"address": "x"}, want: http.StatusNotFound},
-		{method: "GET", path: path, want: http.StatusOK},
-		{method: "GET", path: "/v1/users/ana/endpoints", want: http.StatusOK},
-		// Deleting the user takes its endpoints with it.
-		{method: "DELETE", path: "/v1/users/ana", want: http.StatusNoContent},
-		{method: "GET", path: path, want: http.StatusNotFound},
-		{method: "DELETE", path: path, want: http.StatusNotFound},
-	})
 }
 
-func TestLists(t *testing.T) {
-	c := newTestApp(t)
-	var created audience.List
-	body := object{"name": "beta testers", "description": "early access"}
-	if got := c.call(t, "POST", "/v1/lists", body, &created); got != http.StatusCreated {
-		t.Fatalf("POST /v1/lists = %d, want %d", got, http.StatusCreated)
-	}
-	if created.ID == "" || created.Name != "beta testers" || created.Description != "early access" {
-		t.Errorf("POST /v1/lists = %+v, want an ID, name %q and description %q", created, "beta testers", "early access")
-	}
+func TestErrorBody(t *testing.T) {
+	c, store := newTestAPI(t)
+	store.List(gomock.Any(), testAppID, "l1").Return(audience.List{ID: "l1"}, nil)
+	store.KnownUsers(gomock.Any(), testAppID, []string{"ana", "nobody"}).Return([]string{"ana"}, nil)
 
-	path := "/v1/lists/" + created.ID
-	var updated audience.List
-	if got := c.call(t, "PATCH", path, object{"name": "beta"}, &updated); got != http.StatusOK {
-		t.Fatalf("PATCH %s = %d, want %d", path, got, http.StatusOK)
+	var got errorBody
+	c.call(t, "POST", "/v1/lists/l1/members", `{"user_ids": ["ana", "nobody"]}`, &got)
+	want := errorBody{Error: errorDetail{Code: "not_found", Message: `not found: users ["nobody"]`}}
+	if got != want {
+		t.Errorf("POST /v1/lists/l1/members with an unknown user returned %+v, want %+v", got, want)
 	}
-	if updated.Name != "beta" || updated.Description != "early access" {
-		t.Errorf("PATCH %s with a new name = %+v, want name %q and description unchanged", path, updated, "beta")
-	}
-
-	runSteps(t, c, []step{
-		{method: "POST", path: "/v1/lists", body: object{"name": ""}, want: http.StatusBadRequest},
-		{method: "POST", path: "/v1/lists", body: object{"name": "beta"}, want: http.StatusConflict},
-		{method: "POST", path: "/v1/lists", body: object{"name": "other"}, want: http.StatusCreated},
-		{method: "PATCH", path: path, body: object{"name": "other"}, want: http.StatusConflict},
-		{method: "PATCH", path: path, body: object{"name": ""}, want: http.StatusBadRequest},
-		{method: "GET", path: path, want: http.StatusOK},
-		{method: "GET", path: "/v1/lists", want: http.StatusOK},
-		{method: "DELETE", path: path, want: http.StatusNoContent},
-		{method: "GET", path: path, want: http.StatusNotFound},
-		{method: "DELETE", path: path, want: http.StatusNotFound},
-	})
 }
 
-func TestMembers(t *testing.T) {
-	c := newTestApp(t)
-	var list audience.List
-	if got := c.call(t, "POST", "/v1/lists", object{"name": "beta"}, &list); got != http.StatusCreated {
-		t.Fatalf("Setup: POST /v1/lists = %d, want %d", got, http.StatusCreated)
+func TestInternalErrorsHideTheirCause(t *testing.T) {
+	c, store := newTestAPI(t)
+	store.User(gomock.Any(), testAppID, "ana").Return(audience.User{}, errors.New("password=hunter2 rejected"))
+
+	var got errorBody
+	c.call(t, "GET", "/v1/users/ana", "", &got)
+	want := errorBody{Error: errorDetail{Code: "internal", Message: "internal error"}}
+	if got != want {
+		t.Errorf("GET /v1/users/ana with a failing store returned %+v, want %+v", got, want)
 	}
-	members := "/v1/lists/" + list.ID + "/members"
-
-	runSteps(t, c, []step{
-		{method: "PUT", path: "/v1/users/ana", want: http.StatusCreated},
-		{method: "PUT", path: "/v1/users/bob", want: http.StatusCreated},
-		{method: "PUT", path: "/v1/users/cleo", want: http.StatusCreated},
-
-		{method: "PUT", path: members + "/nobody", want: http.StatusNotFound},
-		{method: "PUT", path: "/v1/lists/missing/members/ana", want: http.StatusNotFound},
-		{method: "GET", path: "/v1/lists/missing/members", want: http.StatusNotFound},
-		{method: "PUT", path: members + "/ana", want: http.StatusNoContent},
-		{method: "PUT", path: members + "/ana", want: http.StatusNoContent},
-
-		{method: "POST", path: members, body: object{"user_ids": []string{}}, want: http.StatusBadRequest},
-		// One unknown user rejects the whole batch, so bob is not added here.
-		{method: "POST", path: members, body: object{"user_ids": []string{"bob", "nobody"}}, want: http.StatusNotFound},
-	})
-
-	type page struct {
-		Items []audience.Member `json:"items"`
-	}
-	ignoreTimes := cmpopts.IgnoreFields(audience.Member{}, "AddedAt")
-	wantMembers := func(when string, want ...audience.Member) {
-		t.Helper()
-		var got page
-		if status := c.call(t, "GET", members, nil, &got); status != http.StatusOK {
-			t.Fatalf("GET %s %s = %d, want %d", members, when, status, http.StatusOK)
-		}
-		if diff := cmp.Diff(page{Items: want}, got, ignoreTimes, cmpopts.EquateEmpty()); diff != "" {
-			t.Errorf("GET %s %s returned unexpected diff (-want +got):\n%s", members, when, diff)
-		}
-	}
-	wantMembers("after a rejected batch", audience.Member{UserID: "ana"})
-
-	var notFound errorBody
-	c.call(t, "POST", members, object{"user_ids": []string{"nobody"}}, &notFound)
-	if want := `not found: users ["nobody"]`; notFound.Error.Message != want {
-		t.Errorf("POST %s with an unknown user returned message %q, want %q", members, notFound.Error.Message, want)
-	}
-
-	runSteps(t, c, []step{
-		{method: "POST", path: members, body: object{"user_ids": []string{"ana", "bob", "cleo"}}, want: http.StatusNoContent},
-	})
-	wantMembers("after a batch", audience.Member{UserID: "ana"}, audience.Member{UserID: "bob"}, audience.Member{UserID: "cleo"})
-
-	runSteps(t, c, []step{
-		{method: "DELETE", path: members + "/bob", want: http.StatusNoContent},
-		{method: "DELETE", path: members + "/bob", want: http.StatusNoContent},
-		// Deleting a user takes it out of its lists.
-		{method: "DELETE", path: "/v1/users/cleo", want: http.StatusNoContent},
-	})
-	wantMembers("after removals", audience.Member{UserID: "ana"})
 }

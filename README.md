@@ -42,6 +42,11 @@ docker compose -f ../compose.yaml up -d --wait db
 DATABASE_URL=postgres://audience:audience@localhost:5432/audience go test ./...
 ```
 
+## Regenerate code
+
+In `notification-system/api`, after changing the `audience.Store` interface run
+`go generate ./...` to rebuild the gomock mock in `internal/audience/audiencetest`.
+
 ## Change the SQL
 
 In `notification-system/api`, edit `db/schema.sql` or `db/queries.sql`, then run

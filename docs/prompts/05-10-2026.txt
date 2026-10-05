@@ -1,2 +1,4 @@
  Commit and push the changes to the main branch at my repository (origin)
 ***
+I understand you have opted for manual mocks. Let's use gomock for terse mocks, less code and
+  less boilerplate

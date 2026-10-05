@@ -93,6 +93,8 @@ type Page struct {
 // Methods that look up or change a single user, endpoint or list return an error
 // wrapping [ErrNotFound] when it does not exist in the app. Inputs have already been
 // validated by [Service].
+//
+//go:generate go tool mockgen -destination=audiencetest/mock_store.go -package=audiencetest . Store
 type Store interface {
 	CreateApp(ctx context.Context, name string) (App, error)
 
