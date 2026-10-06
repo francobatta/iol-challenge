@@ -59,13 +59,12 @@ func (mr *MockRepositoryMockRecorder) AdvanceFanout(ctx, j, cursor, published, l
 }
 
 // ClaimFanout mocks base method.
-func (m *MockRepository) ClaimFanout(ctx context.Context, lease time.Duration) (dispatch.Job, bool, error) {
+func (m *MockRepository) ClaimFanout(ctx context.Context, lease time.Duration) (dispatch.Job, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "ClaimFanout", ctx, lease)
 	ret0, _ := ret[0].(dispatch.Job)
-	ret1, _ := ret[1].(bool)
-	ret2, _ := ret[2].(error)
-	return ret0, ret1, ret2
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // ClaimFanout indicates an expected call of ClaimFanout.

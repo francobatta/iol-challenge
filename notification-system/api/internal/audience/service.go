@@ -36,12 +36,13 @@ func (s *Service) CreateApp(ctx context.Context, name string) (App, error) {
 	return s.repo.CreateApp(ctx, name)
 }
 
-// RegisterUser makes sure the user exists and reports whether this call created it.
-func (s *Service) RegisterUser(ctx context.Context, appID, userID string) (u User, created bool, err error) {
+// RegisterUser creates the user. It returns ErrConflict if the user already exists;
+// User then returns it.
+func (s *Service) RegisterUser(ctx context.Context, appID, userID string) (User, error) {
 	if err := validateUserID(userID); err != nil {
-		return User{}, false, err
+		return User{}, err
 	}
-	return s.repo.PutUser(ctx, appID, userID)
+	return s.repo.CreateUser(ctx, appID, userID)
 }
 
 func validateUserID(userID string) error {

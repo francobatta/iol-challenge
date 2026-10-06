@@ -104,13 +104,15 @@ func (s *Repository) CreateApp(ctx context.Context, name string) (audience.App, 
 	return audience.App{ID: row.AppID.String(), Name: row.Name, CreatedAt: row.CreatedAt}, nil
 }
 
-func (s *Repository) PutUser(ctx context.Context, appID, userID string) (audience.User, bool, error) {
+func (s *Repository) CreateUser(ctx context.Context, appID, userID string) (audience.User, error) {
 	inserted, err := s.q.InsertUser(ctx, queries.InsertUserParams{AppID: toUUID(appID), UserID: userID})
 	if err != nil {
-		return audience.User{}, false, translate(err, "app")
+		return audience.User{}, translate(err, "app")
 	}
-	u, err := s.User(ctx, appID, userID)
-	return u, inserted == 1, err
+	if inserted == 0 {
+		return audience.User{}, fmt.Errorf("%w: user already exists", audience.ErrConflict)
+	}
+	return s.User(ctx, appID, userID)
 }
 
 func (s *Repository) User(ctx context.Context, appID, userID string) (audience.User, error) {

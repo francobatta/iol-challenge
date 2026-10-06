@@ -36,9 +36,8 @@ func TestSendRejectsInvalidRequests(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			svc, _ := newService(t)
-			_, created, err := svc.Send(t.Context(), appID, test.req)
-			if created || !errors.Is(err, audience.ErrInvalid) {
-				t.Errorf("Send(%s) = _, %t, %v, want false, ErrInvalid", test.name, created, err)
+			if _, err := svc.Send(t.Context(), appID, test.req); !errors.Is(err, audience.ErrInvalid) {
+				t.Errorf("Send(%s) = _, %v, want ErrInvalid", test.name, err)
 			}
 		})
 	}
@@ -54,11 +53,11 @@ func TestSend(t *testing.T) {
 
 	repo.List(gomock.Any(), appID, "l1").Return(audience.List{ID: "l1"}, nil)
 	repo.Quota(gomock.Any(), appID).Return(int64(9), int64(10), nil)
-	repo.CreateJob(gomock.Any(), appID, stored).Return(want, true, nil)
+	repo.CreateJob(gomock.Any(), appID, stored).Return(want, nil)
 
-	got, created, err := svc.Send(t.Context(), appID, req)
-	if err != nil || !created {
-		t.Fatalf("Send(%+v) = _, %t, %v, want true, nil", req, created, err)
+	got, err := svc.Send(t.Context(), appID, req)
+	if err != nil {
+		t.Fatalf("Send(%+v) failed: %v", req, err)
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("Send(%+v) returned unexpected diff (-want +got):\n%s", req, diff)
@@ -70,7 +69,7 @@ func TestSendToUnknownList(t *testing.T) {
 	repo.List(gomock.Any(), appID, "missing").Return(audience.List{}, audience.ErrNotFound)
 
 	req := notify.Request{ListID: "missing", Content: notify.Content{Body: "hello"}}
-	if _, _, err := svc.Send(t.Context(), appID, req); !errors.Is(err, audience.ErrNotFound) {
+	if _, err := svc.Send(t.Context(), appID, req); !errors.Is(err, audience.ErrNotFound) {
 		t.Errorf("Send(unknown list) = %v, want ErrNotFound", err)
 	}
 }
@@ -81,7 +80,7 @@ func TestSendOverQuota(t *testing.T) {
 	// No CreateJob call is expected: nothing is stored once the quota is used.
 
 	req := notify.Request{UserIDs: []string{"ana"}, Content: notify.Content{Body: "hello"}}
-	if _, _, err := svc.Send(t.Context(), appID, req); !errors.Is(err, notify.ErrQuotaExceeded) {
+	if _, err := svc.Send(t.Context(), appID, req); !errors.Is(err, notify.ErrQuotaExceeded) {
 		t.Errorf("Send(with the quota used) = %v, want ErrQuotaExceeded", err)
 	}
 }
@@ -90,11 +89,15 @@ func TestSendWithUsedIdempotencyKey(t *testing.T) {
 	svc, repo := newService(t)
 	first := notify.Job{ID: "j1", Status: notify.StatusDispatched}
 	repo.Quota(gomock.Any(), appID).Return(int64(0), int64(10), nil)
-	repo.CreateJob(gomock.Any(), appID, gomock.Any()).Return(first, false, nil)
+	repo.CreateJob(gomock.Any(), appID, gomock.Any()).Return(notify.Job{}, audience.ErrConflict)
+	repo.JobByIdempotencyKey(gomock.Any(), appID, "k").Return(first, nil)
 
 	req := notify.Request{UserIDs: []string{"ana"}, Content: notify.Content{Body: "hello"}, IdempotencyKey: "k"}
-	got, created, err := svc.Send(t.Context(), appID, req)
-	if err != nil || created || got.ID != "j1" {
-		t.Errorf("Send(used idempotency key) = %+v, %t, %v, want job j1, false, nil", got, created, err)
+	if _, err := svc.Send(t.Context(), appID, req); !errors.Is(err, audience.ErrConflict) {
+		t.Errorf("Send(used idempotency key) = _, %v, want ErrConflict", err)
+	}
+	got, err := svc.JobByIdempotencyKey(t.Context(), appID, "k")
+	if err != nil || got != first {
+		t.Errorf("JobByIdempotencyKey(used key) = %+v, %v, want %+v, nil", got, err, first)
 	}
 }

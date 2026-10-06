@@ -22,6 +22,9 @@ import (
 // the lease ran out and another dispatcher went on with it, or the job is gone.
 var ErrClaimLost = errors.New("the fan-out moved on without this dispatcher")
 
+// ErrNothingDue reports that no job is waiting for its fan-out.
+var ErrNothingDue = errors.New("no fan-out is due")
+
 // A Job is a job claimed for fan-out: what to send, to whom, and how far it has got.
 // What an app is told about a job is notify.Job.
 type Job struct {
@@ -51,8 +54,8 @@ type Page struct {
 //go:generate go tool mockgen -destination=dispatchtest/mock.go -package=dispatchtest . Repository,Publisher
 type Repository interface {
 	// ClaimFanout returns the job whose fan-out has been due longest and lets nobody
-	// else claim it for the lease. ok is false if no fan-out is due.
-	ClaimFanout(ctx context.Context, lease time.Duration) (j Job, ok bool, err error)
+	// else claim it for the lease. It returns ErrNothingDue if no fan-out is due.
+	ClaimFanout(ctx context.Context, lease time.Duration) (Job, error)
 	// FanoutPage returns the next limit users of j's audience after j.Cursor, each once.
 	// Users the job names that do not exist have no endpoints and so add nothing.
 	FanoutPage(ctx context.Context, j Job, limit int) (Page, error)

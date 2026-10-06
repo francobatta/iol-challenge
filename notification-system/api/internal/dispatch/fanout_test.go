@@ -62,7 +62,7 @@ func TestNext(t *testing.T) {
 	high := notify.PriorityHigh
 
 	gomock.InOrder(
-		repo.EXPECT().ClaimFanout(ctx, lease).Return(jobAt("", high), true, nil),
+		repo.EXPECT().ClaimFanout(ctx, lease).Return(jobAt("", high), nil),
 
 		// First page: two users with three endpoints between them.
 		repo.EXPECT().FanoutPage(ctx, jobAt("", high), 2).Return(dispatch.Page{
@@ -102,7 +102,7 @@ func TestNext(t *testing.T) {
 
 func TestNextWithNothingDue(t *testing.T) {
 	repo, pub := newMocks(t)
-	repo.EXPECT().ClaimFanout(gomock.Any(), lease).Return(dispatch.Job{}, false, nil)
+	repo.EXPECT().ClaimFanout(gomock.Any(), lease).Return(dispatch.Job{}, dispatch.ErrNothingDue)
 
 	if claimed, err := newFanout(repo, pub, 2).Next(t.Context()); claimed || err != nil {
 		t.Errorf("Next() with no fan-out due = %t, %v, want false, nil", claimed, err)
@@ -114,7 +114,7 @@ func TestNextStopsAtFullQueue(t *testing.T) {
 	ctx := gomock.Any()
 	job := jobAt("", notify.PriorityNormal)
 
-	repo.EXPECT().ClaimFanout(ctx, lease).Return(job, true, nil)
+	repo.EXPECT().ClaimFanout(ctx, lease).Return(job, nil)
 	repo.EXPECT().FanoutPage(ctx, job, 2).Return(dispatch.Page{
 		Endpoints: []audience.Endpoint{{ID: "e1", UserID: "ana", Address: "+1", Channel: audience.ChannelSMS, Provider: "twilio"}},
 		Cursor:    "ana",
@@ -142,14 +142,14 @@ func TestNextReportsRepositoryFailures(t *testing.T) {
 		{
 			name: "Claiming",
 			expect: func(repo *dispatchtest.MockRepositoryMockRecorder) {
-				repo.ClaimFanout(gomock.Any(), lease).Return(dispatch.Job{}, false, down)
+				repo.ClaimFanout(gomock.Any(), lease).Return(dispatch.Job{}, down)
 			},
 			wantErr: down,
 		},
 		{
 			name: "ReadingThePage",
 			expect: func(repo *dispatchtest.MockRepositoryMockRecorder) {
-				repo.ClaimFanout(gomock.Any(), lease).Return(job, true, nil)
+				repo.ClaimFanout(gomock.Any(), lease).Return(job, nil)
 				repo.FanoutPage(gomock.Any(), job, 2).Return(dispatch.Page{}, down)
 			},
 			wantClaimed: true,
@@ -158,7 +158,7 @@ func TestNextReportsRepositoryFailures(t *testing.T) {
 		{
 			name: "LostClaim",
 			expect: func(repo *dispatchtest.MockRepositoryMockRecorder) {
-				repo.ClaimFanout(gomock.Any(), lease).Return(job, true, nil)
+				repo.ClaimFanout(gomock.Any(), lease).Return(job, nil)
 				repo.FanoutPage(gomock.Any(), job, 2).Return(dispatch.Page{Cursor: "bob"}, nil)
 				repo.AdvanceFanout(gomock.Any(), job, "bob", 0, lease).Return(dispatch.ErrClaimLost)
 			},
@@ -187,8 +187,8 @@ func TestRunFansOutUntilCancelled(t *testing.T) {
 
 	// One job is due; after it every poll finds nothing. The test ends the run once
 	// the job is finished.
-	first := repo.EXPECT().ClaimFanout(gomock.Any(), lease).Return(job, true, nil)
-	repo.EXPECT().ClaimFanout(gomock.Any(), lease).Return(dispatch.Job{}, false, nil).After(first).AnyTimes()
+	first := repo.EXPECT().ClaimFanout(gomock.Any(), lease).Return(job, nil)
+	repo.EXPECT().ClaimFanout(gomock.Any(), lease).Return(dispatch.Job{}, dispatch.ErrNothingDue).After(first).AnyTimes()
 	repo.EXPECT().FanoutPage(gomock.Any(), job, 2).Return(dispatch.Page{Last: true}, nil)
 	repo.EXPECT().FinishFanout(gomock.Any(), job, 0).DoAndReturn(func(context.Context, dispatch.Job, int) error {
 		cancel()

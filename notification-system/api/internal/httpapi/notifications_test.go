@@ -27,7 +27,7 @@ func TestSendNotification(t *testing.T) {
 	m.jobs.Quota(gomock.Any(), testAppID).Return(int64(0), int64(100), nil)
 	m.jobs.CreateJob(gomock.Any(), testAppID, want).Return(notify.Job{
 		ID: "j1", Status: notify.StatusPending, Priority: notify.PriorityHigh, CreatedAt: created,
-	}, true, nil)
+	}, nil)
 
 	const body = `{"user_ids": ["ana", "bob"], "list_id": "l1", "priority": "high", "content": {"title": "hi", "body": "hello"}}`
 	var got map[string]any
@@ -50,7 +50,8 @@ func TestSendNotificationAgainWithSameIdempotencyKey(t *testing.T) {
 	c, m := startTestAPI(t)
 	c.idempotencyKey = "key-1"
 	m.jobs.Quota(gomock.Any(), testAppID).Return(int64(0), int64(100), nil)
-	m.jobs.CreateJob(gomock.Any(), testAppID, gomock.Any()).Return(notify.Job{ID: "j1", Status: notify.StatusDispatched}, false, nil)
+	m.jobs.CreateJob(gomock.Any(), testAppID, gomock.Any()).Return(notify.Job{}, audience.ErrConflict)
+	m.jobs.JobByIdempotencyKey(gomock.Any(), testAppID, "key-1").Return(notify.Job{ID: "j1", Status: notify.StatusDispatched}, nil)
 
 	const body = `{"user_ids": ["ana"], "content": {"body": "hello"}}`
 	var got notify.Job

@@ -6,7 +6,7 @@
 // metrics, by app and provider.
 //
 // Failures that callers are expected to tell apart wrap [audience.ErrInvalid],
-// [audience.ErrNotFound] or [ErrQuotaExceeded].
+// [audience.ErrNotFound], [audience.ErrConflict] or [ErrQuotaExceeded].
 package notify
 
 import (
@@ -80,9 +80,11 @@ type Repository interface {
 	// Quota returns the deliveries the app has queued today and how many it may queue.
 	Quota(ctx context.Context, appID string) (used, limit int64, err error)
 	// CreateJob stores a pending job for r and the fan-out it is owed, which is what
-	// gets it dispatched. If the app has already used r.IdempotencyKey it returns the
-	// job that did, and created is false.
-	CreateJob(ctx context.Context, appID string, r Request) (j Job, created bool, err error)
+	// gets it dispatched. It returns ErrConflict, and stores nothing, if the app has
+	// already used r.IdempotencyKey.
+	CreateJob(ctx context.Context, appID string, r Request) (Job, error)
+	// JobByIdempotencyKey returns the job the app created with the key, or ErrNotFound.
+	JobByIdempotencyKey(ctx context.Context, appID, key string) (Job, error)
 	// Job returns ErrNotFound if the job does not exist in the app.
 	Job(ctx context.Context, appID, jobID string) (Job, error)
 	// Jobs returns the app's jobs oldest first.

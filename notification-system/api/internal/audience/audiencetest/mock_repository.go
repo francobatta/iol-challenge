@@ -100,6 +100,21 @@ func (mr *MockRepositoryMockRecorder) CreateList(ctx, appID, l any) *gomock.Call
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreateList", reflect.TypeOf((*MockRepository)(nil).CreateList), ctx, appID, l)
 }
 
+// CreateUser mocks base method.
+func (m *MockRepository) CreateUser(ctx context.Context, appID, userID string) (audience.User, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "CreateUser", ctx, appID, userID)
+	ret0, _ := ret[0].(audience.User)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// CreateUser indicates an expected call of CreateUser.
+func (mr *MockRepositoryMockRecorder) CreateUser(ctx, appID, userID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreateUser", reflect.TypeOf((*MockRepository)(nil).CreateUser), ctx, appID, userID)
+}
+
 // DeleteEndpoint mocks base method.
 func (m *MockRepository) DeleteEndpoint(ctx context.Context, appID, endpointID string) error {
 	m.ctrl.T.Helper()
@@ -246,22 +261,6 @@ func (m *MockRepository) Members(ctx context.Context, appID, listID string, p au
 func (mr *MockRepositoryMockRecorder) Members(ctx, appID, listID, p any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Members", reflect.TypeOf((*MockRepository)(nil).Members), ctx, appID, listID, p)
-}
-
-// PutUser mocks base method.
-func (m *MockRepository) PutUser(ctx context.Context, appID, userID string) (audience.User, bool, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "PutUser", ctx, appID, userID)
-	ret0, _ := ret[0].(audience.User)
-	ret1, _ := ret[1].(bool)
-	ret2, _ := ret[2].(error)
-	return ret0, ret1, ret2
-}
-
-// PutUser indicates an expected call of PutUser.
-func (mr *MockRepositoryMockRecorder) PutUser(ctx, appID, userID any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PutUser", reflect.TypeOf((*MockRepository)(nil).PutUser), ctx, appID, userID)
 }
 
 // RemoveMember mocks base method.

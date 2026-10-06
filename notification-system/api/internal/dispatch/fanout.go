@@ -89,12 +89,12 @@ func (f *Fanout) poll(ctx context.Context, interval time.Duration) {
 //
 // The error wraps broker.ErrRejected if a send queue was full.
 func (f *Fanout) Next(ctx context.Context) (claimed bool, err error) {
-	job, ok, err := f.repo.ClaimFanout(ctx, f.lease)
+	job, err := f.repo.ClaimFanout(ctx, f.lease)
+	if errors.Is(err, ErrNothingDue) {
+		return false, nil
+	}
 	if err != nil {
 		return false, fmt.Errorf("claiming a job to fan out: %w", err)
-	}
-	if !ok {
-		return false, nil
 	}
 	ctx, span := otel.Tracer("dispatch").Start(ctx, "fanout")
 	span.SetAttributes(attribute.String("app_id", job.AppID), attribute.String("job_id", job.JobID))

@@ -13,7 +13,7 @@ import (
 func TestImportEndpoints(t *testing.T) {
 	ctx := t.Context()
 	s, appID := newTestStore(ctx, t)
-	mustPutUsers(ctx, t, s, appID, "ana")
+	mustCreateUsers(ctx, t, s, appID, "ana")
 	list, err := s.CreateList(ctx, appID, audience.List{Name: "beta"})
 	if err != nil {
 		t.Fatalf("Setup: CreateList failed: %v", err)

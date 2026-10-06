@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -25,23 +26,25 @@ func (s *server) sendNotification(w http.ResponseWriter, r *http.Request, appID 
 	defer span.End()
 	span.SetAttributes(attribute.String("app_id", appID))
 
-	job, created, err := s.notifications.Send(ctx, appID, notify.Request{
+	key := r.Header.Get("Idempotency-Key")
+	// Accepted, not created: delivery happens later.
+	status := http.StatusAccepted
+	job, err := s.notifications.Send(ctx, appID, notify.Request{
 		UserIDs:        req.UserIDs,
 		ListID:         req.ListID,
 		Priority:       req.Priority,
 		Content:        req.Content,
-		IdempotencyKey: r.Header.Get("Idempotency-Key"),
+		IdempotencyKey: key,
 	})
+	if errors.Is(err, audience.ErrConflict) {
+		// A repeated request gets the job the first one created, as it is now.
+		status = http.StatusOK
+		job, err = s.notifications.JobByIdempotencyKey(ctx, appID, key)
+	}
 	if err != nil {
 		return err
 	}
 	span.SetAttributes(attribute.String("job_id", job.ID))
-	// Accepted, not created: delivery happens later. A repeated request gets the job
-	// the first one created, as it is now.
-	status := http.StatusOK
-	if created {
-		status = http.StatusAccepted
-	}
 	writeJSON(w, status, job)
 	return nil
 }

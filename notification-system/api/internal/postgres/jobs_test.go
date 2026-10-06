@@ -22,9 +22,9 @@ func mustCreateJob(ctx context.Context, t *testing.T, s *Repository, appID strin
 	if r.Content.Body == "" {
 		r.Content.Body = "hello"
 	}
-	j, created, err := s.CreateJob(ctx, appID, r)
-	if err != nil || !created {
-		t.Fatalf("Setup: CreateJob(%+v) = _, %t, %v, want true, nil", r, created, err)
+	j, err := s.CreateJob(ctx, appID, r)
+	if err != nil {
+		t.Fatalf("Setup: CreateJob(%+v) failed: %v", r, err)
 	}
 	return j
 }
@@ -44,12 +44,15 @@ func mustJob(ctx context.Context, t *testing.T, s *Repository, ref notify.Ref) n
 func mustClaim(ctx context.Context, t *testing.T, s *Repository, appID string, lease time.Duration) (j dispatch.Job, ok bool) {
 	t.Helper()
 	for range 10_000 {
-		j, ok, err := s.ClaimFanout(ctx, lease)
+		j, err := s.ClaimFanout(ctx, lease)
+		if errors.Is(err, dispatch.ErrNothingDue) {
+			return dispatch.Job{}, false
+		}
 		if err != nil {
 			t.Fatalf("ClaimFanout(%v) failed: %v", lease, err)
 		}
-		if !ok || j.AppID == appID {
-			return j, ok
+		if j.AppID == appID {
+			return j, true
 		}
 	}
 	t.Fatalf("ClaimFanout(%v) did not get to the fan-outs of app %s in 10,000 claims", lease, appID)
@@ -66,18 +69,20 @@ func TestCreateJob(t *testing.T) {
 		IdempotencyKey: "key-1",
 	}
 
-	first, created, err := s.CreateJob(ctx, appID, req)
-	if err != nil || !created {
-		t.Fatalf("CreateJob = _, %t, %v, want true, nil", created, err)
+	first, err := s.CreateJob(ctx, appID, req)
+	if err != nil {
+		t.Fatalf("CreateJob(%+v) failed: %v", req, err)
 	}
 	want := notify.Job{Status: notify.StatusPending, Priority: notify.PriorityHigh}
 	if diff := cmp.Diff(want, first, cmpopts.IgnoreFields(notify.Job{}, "ID", "CreatedAt")); diff != "" || first.ID == "" {
 		t.Errorf("CreateJob returned ID %q and unexpected diff (-want +got):\n%s", first.ID, diff)
 	}
 
-	again, created, err := s.CreateJob(ctx, appID, req)
-	if err != nil || created || again.ID != first.ID {
-		t.Errorf("CreateJob(same idempotency key) = job %q, %t, %v, want job %q, false, nil", again.ID, created, err, first.ID)
+	if _, err := s.CreateJob(ctx, appID, req); !errors.Is(err, audience.ErrConflict) {
+		t.Errorf("CreateJob(same idempotency key) = _, %v, want ErrConflict", err)
+	}
+	if again, err := s.JobByIdempotencyKey(ctx, appID, req.IdempotencyKey); err != nil || again.ID != first.ID {
+		t.Errorf("JobByIdempotencyKey(%q) = job %q, %v, want job %q, nil", req.IdempotencyKey, again.ID, err, first.ID)
 	}
 
 	// Without a key every request is a new job.
@@ -154,7 +159,7 @@ func TestClaimFanout(t *testing.T) {
 func TestFanoutPage(t *testing.T) {
 	ctx := t.Context()
 	s, appID := newTestStore(ctx, t)
-	mustPutUsers(ctx, t, s, appID, "ana", "bob", "cleo", "dan", "eve")
+	mustCreateUsers(ctx, t, s, appID, "ana", "bob", "cleo", "dan", "eve")
 	list, err := s.CreateList(ctx, appID, audience.List{Name: "beta"})
 	if err != nil {
 		t.Fatalf("Setup: CreateList failed: %v", err)

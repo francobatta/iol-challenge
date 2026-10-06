@@ -117,14 +117,15 @@ func TestStatus(t *testing.T) {
 		{
 			name: "RegisterNewUser", method: "PUT", path: "/v1/users/ana",
 			expect: func(repo *audiencetest.MockRepositoryMockRecorder) {
-				repo.PutUser(ctx, testAppID, "ana").Return(ana, true, nil)
+				repo.CreateUser(ctx, testAppID, "ana").Return(ana, nil)
 			},
 			want: http.StatusCreated,
 		},
 		{
 			name: "RegisterExistingUser", method: "PUT", path: "/v1/users/ana",
 			expect: func(repo *audiencetest.MockRepositoryMockRecorder) {
-				repo.PutUser(ctx, testAppID, "ana").Return(ana, false, nil)
+				repo.CreateUser(ctx, testAppID, "ana").Return(audience.User{}, audience.ErrConflict)
+				repo.User(ctx, testAppID, "ana").Return(ana, nil)
 			},
 			want: http.StatusOK,
 		},

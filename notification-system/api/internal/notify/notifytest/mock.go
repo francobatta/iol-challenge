@@ -43,13 +43,12 @@ func (m *MockRepository) EXPECT() *MockRepositoryMockRecorder {
 }
 
 // CreateJob mocks base method.
-func (m *MockRepository) CreateJob(ctx context.Context, appID string, r notify.Request) (notify.Job, bool, error) {
+func (m *MockRepository) CreateJob(ctx context.Context, appID string, r notify.Request) (notify.Job, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "CreateJob", ctx, appID, r)
 	ret0, _ := ret[0].(notify.Job)
-	ret1, _ := ret[1].(bool)
-	ret2, _ := ret[2].(error)
-	return ret0, ret1, ret2
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // CreateJob indicates an expected call of CreateJob.
@@ -71,6 +70,21 @@ func (m *MockRepository) Job(ctx context.Context, appID, jobID string) (notify.J
 func (mr *MockRepositoryMockRecorder) Job(ctx, appID, jobID any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Job", reflect.TypeOf((*MockRepository)(nil).Job), ctx, appID, jobID)
+}
+
+// JobByIdempotencyKey mocks base method.
+func (m *MockRepository) JobByIdempotencyKey(ctx context.Context, appID, key string) (notify.Job, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "JobByIdempotencyKey", ctx, appID, key)
+	ret0, _ := ret[0].(notify.Job)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// JobByIdempotencyKey indicates an expected call of JobByIdempotencyKey.
+func (mr *MockRepositoryMockRecorder) JobByIdempotencyKey(ctx, appID, key any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "JobByIdempotencyKey", reflect.TypeOf((*MockRepository)(nil).JobByIdempotencyKey), ctx, appID, key)
 }
 
 // Jobs mocks base method.

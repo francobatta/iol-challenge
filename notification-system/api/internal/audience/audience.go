@@ -19,7 +19,8 @@ var (
 	ErrInvalid = errors.New("invalid")
 	// ErrNotFound reports that a user, endpoint or list does not exist in the app.
 	ErrNotFound = errors.New("not found")
-	// ErrConflict reports that a list name or an endpoint is already taken.
+	// ErrConflict reports that a user, a list name, an endpoint or an idempotency key
+	// is already taken.
 	ErrConflict = errors.New("conflict")
 )
 
@@ -104,8 +105,8 @@ type Page struct {
 type Repository interface {
 	CreateApp(ctx context.Context, name string) (App, error)
 
-	// PutUser creates the user if it does not exist and reports whether it did so.
-	PutUser(ctx context.Context, appID, userID string) (u User, created bool, err error)
+	// CreateUser returns ErrConflict if the user already exists.
+	CreateUser(ctx context.Context, appID, userID string) (User, error)
 	User(ctx context.Context, appID, userID string) (User, error)
 	Users(ctx context.Context, appID string, p Page) ([]User, error)
 	// KnownUsers returns the subset of userIDs that exist.

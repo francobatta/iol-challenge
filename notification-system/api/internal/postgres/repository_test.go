@@ -37,11 +37,11 @@ func newTestStore(ctx context.Context, t *testing.T) (s *Repository, appID strin
 	return s, app.ID
 }
 
-func mustPutUsers(ctx context.Context, t *testing.T, s *Repository, appID string, userIDs ...string) {
+func mustCreateUsers(ctx context.Context, t *testing.T, s *Repository, appID string, userIDs ...string) {
 	t.Helper()
 	for _, id := range userIDs {
-		if _, _, err := s.PutUser(ctx, appID, id); err != nil {
-			t.Fatalf("Setup: PutUser(%q) failed: %v", id, err)
+		if _, err := s.CreateUser(ctx, appID, id); err != nil {
+			t.Fatalf("Setup: CreateUser(%q) failed: %v", id, err)
 		}
 	}
 }
@@ -50,15 +50,17 @@ func TestUsers(t *testing.T) {
 	ctx := t.Context()
 	s, appID := newTestStore(ctx, t)
 
-	first, created, err := s.PutUser(ctx, appID, "b")
-	if err != nil || !created {
-		t.Fatalf("PutUser(new user) = _, %t, %v, want true, nil", created, err)
+	first, err := s.CreateUser(ctx, appID, "b")
+	if err != nil {
+		t.Fatalf("CreateUser(new user) failed: %v", err)
 	}
-	again, created, err := s.PutUser(ctx, appID, "b")
-	if err != nil || created || again != first {
-		t.Errorf("PutUser(existing user) = %+v, %t, %v, want %+v, false, nil", again, created, err, first)
+	if _, err := s.CreateUser(ctx, appID, "b"); !errors.Is(err, audience.ErrConflict) {
+		t.Errorf("CreateUser(existing user) = _, %v, want ErrConflict", err)
 	}
-	mustPutUsers(ctx, t, s, appID, "c", "a")
+	if got, err := s.User(ctx, appID, "b"); err != nil || got != first {
+		t.Errorf("User(existing user) = %+v, %v, want %+v, nil", got, err, first)
+	}
+	mustCreateUsers(ctx, t, s, appID, "c", "a")
 
 	ignoreTimes := cmpopts.IgnoreFields(audience.User{}, "CreatedAt")
 	got, err := s.Users(ctx, appID, audience.Page{After: "a", Limit: 5})
@@ -92,7 +94,7 @@ func TestUsers(t *testing.T) {
 func TestEndpoints(t *testing.T) {
 	ctx := t.Context()
 	s, appID := newTestStore(ctx, t)
-	mustPutUsers(ctx, t, s, appID, "ana")
+	mustCreateUsers(ctx, t, s, appID, "ana")
 	email := audience.Endpoint{UserID: "ana", Address: "ana@example.com", Channel: audience.ChannelEmail, Provider: "mailchimp"}
 
 	if _, err := s.CreateEndpoint(ctx, appID, audience.Endpoint{UserID: "nobody", Address: "x", Channel: audience.ChannelSMS, Provider: "twilio"}); !errors.Is(err, audience.ErrNotFound) {
@@ -198,7 +200,7 @@ func TestLists(t *testing.T) {
 func TestMembers(t *testing.T) {
 	ctx := t.Context()
 	s, appID := newTestStore(ctx, t)
-	mustPutUsers(ctx, t, s, appID, "ana", "bob", "cleo")
+	mustCreateUsers(ctx, t, s, appID, "ana", "bob", "cleo")
 	list, err := s.CreateList(ctx, appID, audience.List{Name: "beta"})
 	if err != nil {
 		t.Fatalf("Setup: CreateList failed: %v", err)

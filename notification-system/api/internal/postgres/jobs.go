@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -32,7 +33,7 @@ func (s *Repository) Quota(ctx context.Context, appID string) (used, limit int64
 	return row.Used, row.DailyQuota, nil
 }
 
-func (s *Repository) CreateJob(ctx context.Context, appID string, r notify.Request) (j notify.Job, created bool, err error) {
+func (s *Repository) CreateJob(ctx context.Context, appID string, r notify.Request) (notify.Job, error) {
 	userIDs := r.UserIDs
 	if userIDs == nil {
 		userIDs = []string{} // the column is NOT NULL
@@ -54,16 +55,23 @@ func (s *Repository) CreateJob(ctx context.Context, appID string, r notify.Reque
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		// The insert was skipped because the key is taken.
-		first, err := s.q.JobByIdempotencyKey(ctx, queries.JobByIdempotencyKeyParams{AppID: toUUID(appID), IdempotencyKey: key})
-		if err != nil {
-			return notify.Job{}, false, translate(err, "job")
-		}
-		return toJob(first), false, nil
+		return notify.Job{}, fmt.Errorf("%w: idempotency key already used", audience.ErrConflict)
 	}
 	if err != nil {
-		return notify.Job{}, false, translate(err, "app")
+		return notify.Job{}, translate(err, "app")
 	}
-	return toJob(queries.Job(row)), true, nil
+	return toJob(queries.Job(row)), nil
+}
+
+func (s *Repository) JobByIdempotencyKey(ctx context.Context, appID, key string) (notify.Job, error) {
+	row, err := s.q.JobByIdempotencyKey(ctx, queries.JobByIdempotencyKeyParams{
+		AppID:          toUUID(appID),
+		IdempotencyKey: pgtype.Text{String: key, Valid: true},
+	})
+	if err != nil {
+		return notify.Job{}, translate(err, "job")
+	}
+	return toJob(row), nil
 }
 
 func (s *Repository) Job(ctx context.Context, appID, jobID string) (notify.Job, error) {
@@ -90,15 +98,15 @@ func (s *Repository) Jobs(ctx context.Context, appID string, p audience.Page) ([
 	return jobs, nil
 }
 
-func (s *Repository) ClaimFanout(ctx context.Context, lease time.Duration) (j dispatch.Job, ok bool, err error) {
+func (s *Repository) ClaimFanout(ctx context.Context, lease time.Duration) (dispatch.Job, error) {
 	row, err := s.q.ClaimFanout(ctx, lease.Seconds())
 	if errors.Is(err, pgx.ErrNoRows) {
-		return dispatch.Job{}, false, nil
+		return dispatch.Job{}, dispatch.ErrNothingDue
 	}
 	if err != nil {
-		return dispatch.Job{}, false, err
+		return dispatch.Job{}, err
 	}
-	j = dispatch.Job{
+	j := dispatch.Job{
 		Ref:      notify.Ref{AppID: row.AppID.String(), JobID: row.JobID.String()},
 		Priority: notify.Priority(row.Priority),
 		UserIDs:  row.UserIds,
@@ -108,7 +116,7 @@ func (s *Repository) ClaimFanout(ctx context.Context, lease time.Duration) (j di
 	if row.ListID.Valid {
 		j.ListID = row.ListID.String()
 	}
-	return j, true, nil
+	return j, nil
 }
 
 func (s *Repository) FanoutPage(ctx context.Context, j dispatch.Job, limit int) (dispatch.Page, error) {

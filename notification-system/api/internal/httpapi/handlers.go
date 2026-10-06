@@ -34,13 +34,16 @@ func (s *server) createApp(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (s *server) registerUser(w http.ResponseWriter, r *http.Request, appID string) error {
-	u, created, err := s.audiences.RegisterUser(r.Context(), appID, chi.URLParam(r, "user_id"))
+	userID := chi.URLParam(r, "user_id")
+	status := http.StatusCreated
+	u, err := s.audiences.RegisterUser(r.Context(), appID, userID)
+	if errors.Is(err, audience.ErrConflict) {
+		// Registering is idempotent: a user that exists is returned as it is.
+		status = http.StatusOK
+		u, err = s.audiences.User(r.Context(), appID, userID)
+	}
 	if err != nil {
 		return err
-	}
-	status := http.StatusOK
-	if created {
-		status = http.StatusCreated
 	}
 	writeJSON(w, status, u)
 	return nil

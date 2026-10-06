@@ -36,9 +36,9 @@ func TestRegisterUserValidatesID(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			svc, repo := newService(t)
 			if test.wantErr == nil {
-				repo.PutUser(gomock.Any(), appID, test.userID).Return(audience.User{ID: test.userID}, true, nil)
+				repo.CreateUser(gomock.Any(), appID, test.userID).Return(audience.User{ID: test.userID}, nil)
 			}
-			_, _, err := svc.RegisterUser(t.Context(), appID, test.userID)
+			_, err := svc.RegisterUser(t.Context(), appID, test.userID)
 			if !errors.Is(err, test.wantErr) {
 				t.Errorf("RegisterUser(%q) = %v, want error %v", test.userID, err, test.wantErr)
 			}
