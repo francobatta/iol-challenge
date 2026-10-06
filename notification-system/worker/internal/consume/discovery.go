@@ -4,12 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/francobatta/iol-challenge/notification-system/commons/topology"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/francobatta/iol-challenge/notification-system/commons/topology"
 )
 
 // discoveryPageSize is how many queue names are asked of the management API at a time.

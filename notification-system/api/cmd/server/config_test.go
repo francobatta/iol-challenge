@@ -1,6 +1,7 @@
 package main
 
 import (
+	"maps"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -61,9 +62,7 @@ func TestParseConfigRejectsEmptyRequired(t *testing.T) {
 // environWith returns base with set applied; an empty value in set removes the variable.
 func environWith(base, set map[string]string) map[string]string {
 	environ := make(map[string]string)
-	for name, value := range base {
-		environ[name] = value
-	}
+	maps.Copy(environ, base)
 	for name, value := range set {
 		if value == "" {
 			delete(environ, name)

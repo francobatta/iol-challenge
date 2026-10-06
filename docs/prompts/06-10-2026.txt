@@ -107,3 +107,22 @@ How can we monitor the services right now? Integrate basic APM into the existing
 It must also link to a DESIGN.md file I will write later (create empty).
 
 Bring all the stuff you may need in a very summarized form to a CLAUDE.md file.
+***
+Let's create diagrams for this system based on the current state. Use mermaid and be clear. Prefer simple
+  design. Diagrams to create:
+
+  * Entity Relationship Diagram for all pg tables
+  * queue topology (shape, rationale summarized), retry and rate limiting decisions in diagram. RabbitMQ
+  * observability stack and k8s high-level overview (KEDA scaling, deployments)
+  * sequence diagram for a typical use case (create notif, 202, fan-out, workers pick, ACKs)
+
+  Store all diagrams under docs/diagrams
+***
+ There are many functions in this codebase which make use of (returnValue, bool, err) triples
+  as return type. Refactor to use a more idiomatic (returnValue, err) approach, and if
+  returnValue must be nil keep it nil, else enforce an error and check from the caller.
+  Refactor, run all tests and make sure compose runs correctly after this refactor.
+***
+Add golangci lint v2 to the codebase. Run minimal linters and go fix to ensure cohesive
+  spacing and automatic refactors. Let's avoid no-noes and keep opinionated strictness away for
+  now.

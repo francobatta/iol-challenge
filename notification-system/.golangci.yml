@@ -1,0 +1,25 @@
+# golangci-lint v2, shared by the api, worker and commons modules. Run it from inside a
+# module: golangci-lint run ./...   (golangci-lint fmt ./... only formats)
+version: "2"
+
+linters:
+  # errcheck, govet, ineffassign, staticcheck and unused: what is wrong, not what is a
+  # matter of taste.
+  default: standard
+  exclusions:
+    generated: strict # sqlc and mockgen output
+    presets:
+      - std-error-handling # unchecked Close, Flush, Print and the like
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    gofmt:
+      simplify: true
+    goimports:
+      local-prefixes:
+        - github.com/francobatta/iol-challenge
+  exclusions:
+    generated: strict

@@ -83,6 +83,8 @@ cd web && npm test -- --run        # also: npm run lint, npm run build
 - `commons/message/testdata` pins the wire format; `commons/providers` lists the steps to
   add a provider.
 - Go follows the `google-go-style` skill.
+- Lint each Go module from inside it: `go fix ./... && golangci-lint run --fix ./...`
+  (v2, config in `.golangci.yml`: the standard linters plus gofmt and goimports).
 
 ## Things that bite
 

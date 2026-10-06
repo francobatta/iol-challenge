@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -33,8 +34,8 @@ func (f *fakeManagementAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(f.status)
 		return
 	}
-	var page int
-	fmt.Sscan(r.URL.Query().Get("page"), &page)
+	// A missing or malformed page stays 0, which matches no queue.
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 	items := ""
 	if page >= 1 && page <= len(f.queues) {
 		items = fmt.Sprintf(`{"name": %q}`, f.queues[page-1])
