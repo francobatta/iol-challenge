@@ -11,9 +11,10 @@ import (
 )
 
 type App struct {
-	AppID     pgtype.UUID
-	Name      string
-	CreatedAt time.Time
+	AppID      pgtype.UUID
+	Name       string
+	CreatedAt  time.Time
+	DailyQuota int64
 }
 
 type Endpoint struct {
@@ -23,6 +24,28 @@ type Endpoint struct {
 	Address    string
 	Channel    string
 	Provider   string
+}
+
+type Fanout struct {
+	AppID      pgtype.UUID
+	JobID      pgtype.UUID
+	UserCursor string
+	RunAfter   time.Time
+}
+
+type Job struct {
+	AppID          pgtype.UUID
+	JobID          pgtype.UUID
+	Status         string
+	Priority       string
+	UserIds        []string
+	ListID         pgtype.UUID
+	Title          string
+	Body           string
+	IdempotencyKey pgtype.Text
+	Queued         int64
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 type List struct {
@@ -38,6 +61,12 @@ type ListMember struct {
 	ListID  pgtype.UUID
 	UserID  string
 	AddedAt time.Time
+}
+
+type UsageDaily struct {
+	AppID  pgtype.UUID
+	Day    pgtype.Date
+	Queued int64
 }
 
 type User struct {

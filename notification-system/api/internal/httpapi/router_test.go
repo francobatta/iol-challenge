@@ -1,4 +1,4 @@
-package api
+package httpapi
 
 import (
 	"encoding/json"
@@ -13,6 +13,8 @@ import (
 
 	"github.com/francobatta/iol-challenge/notification-system/api/internal/audience"
 	"github.com/francobatta/iol-challenge/notification-system/api/internal/audience/audiencetest"
+	"github.com/francobatta/iol-challenge/notification-system/api/internal/notify"
+	"github.com/francobatta/iol-challenge/notification-system/api/internal/notify/notifytest"
 	"github.com/francobatta/iol-challenge/notification-system/api/internal/token"
 )
 
@@ -23,9 +25,10 @@ const (
 
 // A client calls a test server with the credentials it holds.
 type client struct {
-	baseURL  string
-	token    string
-	adminKey string
+	baseURL        string
+	token          string
+	adminKey       string
+	idempotencyKey string
 }
 
 // call sends a request and returns the response status. A non-empty body is sent as
@@ -38,6 +41,9 @@ func (c client) call(t *testing.T, method, path, body string, out any) int {
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("X-Admin-Key", c.adminKey)
+	if c.idempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", c.idempotencyKey)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("%s %s failed: %v", method, path, err)
@@ -51,10 +57,25 @@ func (c client) call(t *testing.T, method, path, body string, out any) int {
 	return resp.StatusCode
 }
 
-// newTestAPI starts the API over a mock store. It returns a client holding a token
-// for testAppID, and the recorder on which a test states the store calls it expects.
-// Any other store call fails the test.
-func newTestAPI(t *testing.T) (client, *audiencetest.MockStoreMockRecorder) {
+// newTestAPI starts the API over a mock repository. It returns a client holding a token
+// for testAppID, and the recorder on which a test states the repository calls it expects.
+// Any other repository call fails the test.
+func newTestAPI(t *testing.T) (client, *audiencetest.MockRepositoryMockRecorder) {
+	t.Helper()
+	c, m := startTestAPI(t)
+	return c, m.audience
+}
+
+// The mocks behind a test server. A test states the calls it expects on them; any
+// other call fails the test.
+type mocks struct {
+	audience *audiencetest.MockRepositoryMockRecorder
+	jobs     *notifytest.MockRepositoryMockRecorder
+}
+
+// startTestAPI starts the API over mocks and returns a client holding a token for
+// testAppID.
+func startTestAPI(t *testing.T) (client, mocks) {
 	t.Helper()
 	tokens, err := token.NewSigner("test-secret")
 	if err != nil {
@@ -64,38 +85,39 @@ func newTestAPI(t *testing.T) (client, *audiencetest.MockStoreMockRecorder) {
 	if err != nil {
 		t.Fatalf("Setup: Issue(%q) failed: %v", testAppID, err)
 	}
-	store := audiencetest.NewMockStore(gomock.NewController(t))
-	srv := httptest.NewServer(NewHandler(audience.NewService(store), tokens, testAdminKey))
+	ctrl := gomock.NewController(t)
+	repo, jobs := audiencetest.NewMockRepository(ctrl), notifytest.NewMockRepository(ctrl)
+	srv := httptest.NewServer(NewRouter(audience.NewService(repo), notify.NewService(jobs), tokens, testAdminKey))
 	t.Cleanup(srv.Close)
-	return client{baseURL: srv.URL, token: tok}, store.EXPECT()
+	return client{baseURL: srv.URL, token: tok}, mocks{audience: repo.EXPECT(), jobs: jobs.EXPECT()}
 }
 
 func TestStatus(t *testing.T) {
 	ctx := gomock.Any()
 	var (
 		ana   = audience.User{ID: "ana"}
-		email = audience.Endpoint{ID: "e1", UserID: "ana", Address: "ana@example.com", Channel: audience.ChannelEmail, Provider: "ses"}
+		email = audience.Endpoint{ID: "e1", UserID: "ana", Address: "ana@example.com", Channel: audience.ChannelEmail, Provider: "mailchimp"}
 		beta  = audience.List{ID: "l1", Name: "beta", Description: "early access"}
 	)
-	const emailBody = `{"address": "ana@example.com", "channel": "email", "provider": "ses"}`
+	const emailBody = `{"address": "ana@example.com", "channel": "email", "provider": "mailchimp"}`
 
 	tests := []struct {
 		name               string
 		method, path, body string
-		expect             func(store *audiencetest.MockStoreMockRecorder)
+		expect             func(repo *audiencetest.MockRepositoryMockRecorder)
 		want               int
 	}{
 		{
 			name: "RegisterNewUser", method: "PUT", path: "/v1/users/ana",
-			expect: func(store *audiencetest.MockStoreMockRecorder) {
-				store.PutUser(ctx, testAppID, "ana").Return(ana, true, nil)
+			expect: func(repo *audiencetest.MockRepositoryMockRecorder) {
+				repo.PutUser(ctx, testAppID, "ana").Return(ana, true, nil)
 			},
 			want: http.StatusCreated,
 		},
 		{
 			name: "RegisterExistingUser", method: "PUT", path: "/v1/users/ana",
-			expect: func(store *audiencetest.MockStoreMockRecorder) {
-				store.PutUser(ctx, testAppID, "ana").Return(ana, false, nil)
+			expect: func(repo *audiencetest.MockRepositoryMockRecorder) {
+				repo.PutUser(ctx, testAppID, "ana").Return(ana, false, nil)
 			},
 			want: http.StatusOK,
 		},
@@ -105,71 +127,71 @@ func TestStatus(t *testing.T) {
 		},
 		{
 			name: "GetUser", method: "GET", path: "/v1/users/ana",
-			expect: func(store *audiencetest.MockStoreMockRecorder) {
-				store.User(ctx, testAppID, "ana").Return(ana, nil)
+			expect: func(repo *audiencetest.MockRepositoryMockRecorder) {
+				repo.User(ctx, testAppID, "ana").Return(ana, nil)
 			},
 			want: http.StatusOK,
 		},
 		{
 			name: "GetUnknownUser", method: "GET", path: "/v1/users/ana",
-			expect: func(store *audiencetest.MockStoreMockRecorder) {
-				store.User(ctx, testAppID, "ana").Return(audience.User{}, audience.ErrNotFound)
+			expect: func(repo *audiencetest.MockRepositoryMockRecorder) {
+				repo.User(ctx, testAppID, "ana").Return(audience.User{}, audience.ErrNotFound)
 			},
 			want: http.StatusNotFound,
 		},
 		{
 			name: "StoreFailure", method: "GET", path: "/v1/users/ana",
-			expect: func(store *audiencetest.MockStoreMockRecorder) {
-				store.User(ctx, testAppID, "ana").Return(audience.User{}, errors.New("database is down"))
+			expect: func(repo *audiencetest.MockRepositoryMockRecorder) {
+				repo.User(ctx, testAppID, "ana").Return(audience.User{}, errors.New("database is down"))
 			},
 			want: http.StatusInternalServerError,
 		},
 		{
 			name: "DeleteUser", method: "DELETE", path: "/v1/users/ana",
-			expect: func(store *audiencetest.MockStoreMockRecorder) {
-				store.DeleteUser(ctx, testAppID, "ana").Return(nil)
+			expect: func(repo *audiencetest.MockRepositoryMockRecorder) {
+				repo.DeleteUser(ctx, testAppID, "ana").Return(nil)
 			},
 			want: http.StatusNoContent,
 		},
 		{
 			name: "DeleteUnknownUser", method: "DELETE", path: "/v1/users/ana",
-			expect: func(store *audiencetest.MockStoreMockRecorder) {
-				store.DeleteUser(ctx, testAppID, "ana").Return(audience.ErrNotFound)
+			expect: func(repo *audiencetest.MockRepositoryMockRecorder) {
+				repo.DeleteUser(ctx, testAppID, "ana").Return(audience.ErrNotFound)
 			},
 			want: http.StatusNotFound,
 		},
 
 		{
 			name: "CreateEndpoint", method: "POST", path: "/v1/users/ana/endpoints", body: emailBody,
-			expect: func(store *audiencetest.MockStoreMockRecorder) {
-				store.CreateEndpoint(ctx, testAppID, audience.Endpoint{
-					UserID: "ana", Address: "ana@example.com", Channel: audience.ChannelEmail, Provider: "ses",
+			expect: func(repo *audiencetest.MockRepositoryMockRecorder) {
+				repo.CreateEndpoint(ctx, testAppID, audience.Endpoint{
+					UserID: "ana", Address: "ana@example.com", Channel: audience.ChannelEmail, Provider: "mailchimp",
 				}).Return(email, nil)
 			},
 			want: http.StatusCreated,
 		},
 		{
 			name: "CreateEndpointForUnknownUser", method: "POST", path: "/v1/users/ana/endpoints", body: emailBody,
-			expect: func(store *audiencetest.MockStoreMockRecorder) {
-				store.CreateEndpoint(ctx, testAppID, gomock.Any()).Return(audience.Endpoint{}, audience.ErrNotFound)
+			expect: func(repo *audiencetest.MockRepositoryMockRecorder) {
+				repo.CreateEndpoint(ctx, testAppID, gomock.Any()).Return(audience.Endpoint{}, audience.ErrNotFound)
 			},
 			want: http.StatusNotFound,
 		},
 		{
 			name: "CreateDuplicateEndpoint", method: "POST", path: "/v1/users/ana/endpoints", body: emailBody,
-			expect: func(store *audiencetest.MockStoreMockRecorder) {
-				store.CreateEndpoint(ctx, testAppID, gomock.Any()).Return(audience.Endpoint{}, audience.ErrConflict)
+			expect: func(repo *audiencetest.MockRepositoryMockRecorder) {
+				repo.CreateEndpoint(ctx, testAppID, gomock.Any()).Return(audience.Endpoint{}, audience.ErrConflict)
 			},
 			want: http.StatusConflict,
 		},
 		{
 			name: "CreateEndpointWithUnknownChannel", method: "POST", path: "/v1/users/ana/endpoints",
-			body: `{"address": "x", "channel": "fax", "provider": "p"}`,
+			body: `{"address": "x", "channel": "fax", "provider": "twilio"}`,
 			want: http.StatusBadRequest,
 		},
 		{
 			name: "CreateEndpointWithoutAddress", method: "POST", path: "/v1/users/ana/endpoints",
-			body: `{"channel": "sms", "provider": "p"}`,
+			body: `{"channel": "sms", "provider": "twilio"}`,
 			want: http.StatusBadRequest,
 		},
 		{
@@ -179,7 +201,7 @@ func TestStatus(t *testing.T) {
 		},
 		{
 			name: "CreateEndpointWithUnknownField", method: "POST", path: "/v1/users/ana/endpoints",
-			body: `{"address": "x", "channel": "sms", "provider": "p", "extra": 1}`,
+			body: `{"address": "x", "channel": "sms", "provider": "twilio", "extra": 1}`,
 			want: http.StatusBadRequest,
 		},
 		{
@@ -189,55 +211,67 @@ func TestStatus(t *testing.T) {
 		},
 		{
 			name: "GetEndpoint", method: "GET", path: "/v1/endpoints/e1",
-			expect: func(store *audiencetest.MockStoreMockRecorder) {
-				store.Endpoint(ctx, testAppID, "e1").Return(email, nil)
+			expect: func(repo *audiencetest.MockRepositoryMockRecorder) {
+				repo.Endpoint(ctx, testAppID, "e1").Return(email, nil)
 			},
 			want: http.StatusOK,
 		},
 		{
 			name: "ListEndpointsOfUnknownUser", method: "GET", path: "/v1/users/ana/endpoints",
-			expect: func(store *audiencetest.MockStoreMockRecorder) {
-				store.User(ctx, testAppID, "ana").Return(audience.User{}, audience.ErrNotFound)
+			expect: func(repo *audiencetest.MockRepositoryMockRecorder) {
+				repo.User(ctx, testAppID, "ana").Return(audience.User{}, audience.ErrNotFound)
 			},
 			want: http.StatusNotFound,
 		},
 		{
-			name: "UpdateEndpoint", method: "PATCH", path: "/v1/endpoints/e1", body: `{"provider": "sendgrid"}`,
-			expect: func(store *audiencetest.MockStoreMockRecorder) {
-				// Only the provider changes; the other fields keep their stored values.
+			name: "UpdateEndpoint", method: "PATCH", path: "/v1/endpoints/e1", body: `{"address": "new@example.com"}`,
+			expect: func(repo *audiencetest.MockRepositoryMockRecorder) {
+				// Only the address changes; the other fields keep their stored values.
 				updated := email
-				updated.Provider = "sendgrid"
-				store.Endpoint(ctx, testAppID, "e1").Return(email, nil)
-				store.UpdateEndpoint(ctx, testAppID, updated).Return(updated, nil)
+				updated.Address = "new@example.com"
+				repo.Endpoint(ctx, testAppID, "e1").Return(email, nil)
+				repo.UpdateEndpoint(ctx, testAppID, updated).Return(updated, nil)
 			},
 			want: http.StatusOK,
 		},
 		{
+			name: "UpdateEndpointToProviderOfAnotherChannel", method: "PATCH", path: "/v1/endpoints/e1", body: `{"provider": "twilio"}`,
+			expect: func(repo *audiencetest.MockRepositoryMockRecorder) {
+				repo.Endpoint(ctx, testAppID, "e1").Return(email, nil)
+			},
+			want: http.StatusBadRequest,
+		},
+		{
+			name: "CreateEndpointWithProviderOfAnotherChannel", method: "POST", path: "/v1/users/ana/endpoints",
+			body: `{"address": "x", "channel": "sms", "provider": "fcm"}`,
+			want: http.StatusBadRequest,
+		},
+		{
 			name: "UpdateEndpointToUnknownChannel", method: "PATCH", path: "/v1/endpoints/e1", body: `{"channel": "fax"}`,
-			expect: func(store *audiencetest.MockStoreMockRecorder) {
-				store.Endpoint(ctx, testAppID, "e1").Return(email, nil)
+			expect: func(repo *audiencetest.MockRepositoryMockRecorder) {
+				repo.Endpoint(ctx, testAppID, "e1").Return(email, nil)
 			},
 			want: http.StatusBadRequest,
 		},
 		{
 			name: "UpdateUnknownEndpoint", method: "PATCH", path: "/v1/endpoints/e1", body: `{"address": "x"}`,
-			expect: func(store *audiencetest.MockStoreMockRecorder) {
-				store.Endpoint(ctx, testAppID, "e1").Return(audience.Endpoint{}, audience.ErrNotFound)
+			expect: func(repo *audiencetest.MockRepositoryMockRecorder) {
+				repo.Endpoint(ctx, testAppID, "e1").Return(audience.Endpoint{}, audience.ErrNotFound)
 			},
 			want: http.StatusNotFound,
 		},
 		{
 			name: "DeleteEndpoint", method: "DELETE", path: "/v1/endpoints/e1",
-			expect: func(store *audiencetest.MockStoreMockRecorder) {
-				store.DeleteEndpoint(ctx, testAppID, "e1").Return(nil)
+			expect: func(repo *audiencetest.MockRepositoryMockRecorder) {
+				repo.DeleteEndpoint(ctx, testAppID, "e1").Return(nil)
 			},
 			want: http.StatusNoContent,
 		},
 
 		{
 			name: "CreateList", method: "POST", path: "/v1/lists", body: `{"name": "beta", "description": "early access"}`,
-			expect: func(store *audiencetest.MockStoreMockRecorder) {
-				store.CreateList(ctx, testAppID, audience.List{Name: "beta", Description: "early access"}).Return(beta, nil)
+			expect: func(repo *audiencetest.MockRepositoryMockRecorder) {
+				repo.CreateList(ctx, testAppID, audience.List{Name: "beta", Description: "early access"}).Return(beta, nil)
 			},
 			want: http.StatusCreated,
 		},
@@ -247,74 +281,74 @@ func TestStatus(t *testing.T) {
 		},
 		{
 			name: "CreateListWithTakenName", method: "POST", path: "/v1/lists", body: `{"name": "beta"}`,
-			expect: func(store *audiencetest.MockStoreMockRecorder) {
-				store.CreateList(ctx, testAppID, gomock.Any()).Return(audience.List{}, audience.ErrConflict)
+			expect: func(repo *audiencetest.MockRepositoryMockRecorder) {
+				repo.CreateList(ctx, testAppID, gomock.Any()).Return(audience.List{}, audience.ErrConflict)
 			},
 			want: http.StatusConflict,
 		},
 		{
 			name: "GetList", method: "GET", path: "/v1/lists/l1",
-			expect: func(store *audiencetest.MockStoreMockRecorder) {
-				store.List(ctx, testAppID, "l1").Return(beta, nil)
+			expect: func(repo *audiencetest.MockRepositoryMockRecorder) {
+				repo.List(ctx, testAppID, "l1").Return(beta, nil)
 			},
 			want: http.StatusOK,
 		},
 		{
 			name: "UpdateList", method: "PATCH", path: "/v1/lists/l1", body: `{"name": "testers"}`,
-			expect: func(store *audiencetest.MockStoreMockRecorder) {
+			expect: func(repo *audiencetest.MockRepositoryMockRecorder) {
 				// Only the name changes; the description keeps its stored value.
 				updated := beta
 				updated.Name = "testers"
-				store.List(ctx, testAppID, "l1").Return(beta, nil)
-				store.UpdateList(ctx, testAppID, updated).Return(updated, nil)
+				repo.List(ctx, testAppID, "l1").Return(beta, nil)
+				repo.UpdateList(ctx, testAppID, updated).Return(updated, nil)
 			},
 			want: http.StatusOK,
 		},
 		{
 			name: "UpdateListToEmptyName", method: "PATCH", path: "/v1/lists/l1", body: `{"name": ""}`,
-			expect: func(store *audiencetest.MockStoreMockRecorder) {
-				store.List(ctx, testAppID, "l1").Return(beta, nil)
+			expect: func(repo *audiencetest.MockRepositoryMockRecorder) {
+				repo.List(ctx, testAppID, "l1").Return(beta, nil)
 			},
 			want: http.StatusBadRequest,
 		},
 		{
 			name: "DeleteList", method: "DELETE", path: "/v1/lists/l1",
-			expect: func(store *audiencetest.MockStoreMockRecorder) {
-				store.DeleteList(ctx, testAppID, "l1").Return(nil)
+			expect: func(repo *audiencetest.MockRepositoryMockRecorder) {
+				repo.DeleteList(ctx, testAppID, "l1").Return(nil)
 			},
 			want: http.StatusNoContent,
 		},
 
 		{
 			name: "AddMember", method: "PUT", path: "/v1/lists/l1/members/ana",
-			expect: func(store *audiencetest.MockStoreMockRecorder) {
-				store.List(ctx, testAppID, "l1").Return(beta, nil)
-				store.KnownUsers(ctx, testAppID, []string{"ana"}).Return([]string{"ana"}, nil)
-				store.AddMembers(ctx, testAppID, "l1", []string{"ana"}).Return(nil)
+			expect: func(repo *audiencetest.MockRepositoryMockRecorder) {
+				repo.List(ctx, testAppID, "l1").Return(beta, nil)
+				repo.KnownUsers(ctx, testAppID, []string{"ana"}).Return([]string{"ana"}, nil)
+				repo.AddMembers(ctx, testAppID, "l1", []string{"ana"}).Return(nil)
 			},
 			want: http.StatusNoContent,
 		},
 		{
 			name: "AddUnknownUserAsMember", method: "PUT", path: "/v1/lists/l1/members/ana",
-			expect: func(store *audiencetest.MockStoreMockRecorder) {
-				store.List(ctx, testAppID, "l1").Return(beta, nil)
-				store.KnownUsers(ctx, testAppID, []string{"ana"}).Return(nil, nil)
+			expect: func(repo *audiencetest.MockRepositoryMockRecorder) {
+				repo.List(ctx, testAppID, "l1").Return(beta, nil)
+				repo.KnownUsers(ctx, testAppID, []string{"ana"}).Return(nil, nil)
 			},
 			want: http.StatusNotFound,
 		},
 		{
 			name: "AddMemberToUnknownList", method: "PUT", path: "/v1/lists/l1/members/ana",
-			expect: func(store *audiencetest.MockStoreMockRecorder) {
-				store.List(ctx, testAppID, "l1").Return(audience.List{}, audience.ErrNotFound)
+			expect: func(repo *audiencetest.MockRepositoryMockRecorder) {
+				repo.List(ctx, testAppID, "l1").Return(audience.List{}, audience.ErrNotFound)
 			},
 			want: http.StatusNotFound,
 		},
 		{
 			name: "AddMembers", method: "POST", path: "/v1/lists/l1/members", body: `{"user_ids": ["ana", "bob"]}`,
-			expect: func(store *audiencetest.MockStoreMockRecorder) {
-				store.List(ctx, testAppID, "l1").Return(beta, nil)
-				store.KnownUsers(ctx, testAppID, []string{"ana", "bob"}).Return([]string{"ana", "bob"}, nil)
-				store.AddMembers(ctx, testAppID, "l1", []string{"ana", "bob"}).Return(nil)
+			expect: func(repo *audiencetest.MockRepositoryMockRecorder) {
+				repo.List(ctx, testAppID, "l1").Return(beta, nil)
+				repo.KnownUsers(ctx, testAppID, []string{"ana", "bob"}).Return([]string{"ana", "bob"}, nil)
+				repo.AddMembers(ctx, testAppID, "l1", []string{"ana", "bob"}).Return(nil)
 			},
 			want: http.StatusNoContent,
 		},
@@ -324,24 +358,24 @@ func TestStatus(t *testing.T) {
 		},
 		{
 			name: "RemoveMember", method: "DELETE", path: "/v1/lists/l1/members/ana",
-			expect: func(store *audiencetest.MockStoreMockRecorder) {
-				store.RemoveMember(ctx, testAppID, "l1", "ana").Return(nil)
+			expect: func(repo *audiencetest.MockRepositoryMockRecorder) {
+				repo.RemoveMember(ctx, testAppID, "l1", "ana").Return(nil)
 			},
 			want: http.StatusNoContent,
 		},
 		{
 			name: "ListMembersOfUnknownList", method: "GET", path: "/v1/lists/l1/members",
-			expect: func(store *audiencetest.MockStoreMockRecorder) {
-				store.List(ctx, testAppID, "l1").Return(audience.List{}, audience.ErrNotFound)
+			expect: func(repo *audiencetest.MockRepositoryMockRecorder) {
+				repo.List(ctx, testAppID, "l1").Return(audience.List{}, audience.ErrNotFound)
 			},
 			want: http.StatusNotFound,
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			c, store := newTestAPI(t)
+			c, repo := newTestAPI(t)
 			if test.expect != nil {
-				test.expect(store)
+				test.expect(repo)
 			}
 			if got := c.call(t, test.method, test.path, test.body, nil); got != test.want {
 				t.Errorf("%s %s with body %q = %d, want %d", test.method, test.path, test.body, got, test.want)
@@ -351,10 +385,10 @@ func TestStatus(t *testing.T) {
 }
 
 func TestCreateApp(t *testing.T) {
-	c, store := newTestAPI(t)
+	c, repo := newTestAPI(t)
 	c.adminKey = testAdminKey
 	c.token = ""
-	store.CreateApp(gomock.Any(), "my app").Return(audience.App{ID: "app-2", Name: "my app"}, nil)
+	repo.CreateApp(gomock.Any(), "my app").Return(audience.App{ID: "app-2", Name: "my app"}, nil)
 
 	var created struct {
 		AppID string `json:"app_id"`
@@ -368,8 +402,8 @@ func TestCreateApp(t *testing.T) {
 		t.Errorf("POST /v1/apps = %+v, want app_id %q and name %q", created, "app-2", "my app")
 	}
 
-	// The returned token must act as the new app: the store is asked for app-2's users.
-	store.Users(gomock.Any(), "app-2", gomock.Any()).Return(nil, nil)
+	// The returned token must act as the new app: the repository is asked for app-2's users.
+	repo.Users(gomock.Any(), "app-2", gomock.Any()).Return(nil, nil)
 	asApp := client{baseURL: c.baseURL, token: created.Token}
 	if got := asApp.call(t, "GET", "/v1/users", "", nil); got != http.StatusOK {
 		t.Errorf("GET /v1/users with the token of the new app = %d, want %d", got, http.StatusOK)
@@ -409,6 +443,34 @@ func TestRequestsWithoutValidTokenAreRejected(t *testing.T) {
 	}
 }
 
+func TestUnknownRoutes(t *testing.T) {
+	c, _ := newTestAPI(t)
+	if got := c.call(t, "GET", "/v1/nothing", "", nil); got != http.StatusNotFound {
+		t.Errorf("GET /v1/nothing with a token = %d, want %d", got, http.StatusNotFound)
+	}
+	// Without a token an unknown route looks like any other, so the API does not
+	// reveal which routes exist.
+	c.token = ""
+	if got := c.call(t, "GET", "/v1/nothing", "", nil); got != http.StatusUnauthorized {
+		t.Errorf("GET /v1/nothing without a token = %d, want %d", got, http.StatusUnauthorized)
+	}
+}
+
+func TestAppHandlerRefusesToRunWithoutAuthentication(t *testing.T) {
+	called := false
+	h := appHandler(func(w http.ResponseWriter, r *http.Request, appID string) error {
+		called = true
+		return nil
+	})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/users", nil))
+
+	if called || rec.Code != http.StatusInternalServerError {
+		t.Errorf("appHandler outside authenticateApp: handler called = %t, status = %d, want false, %d",
+			called, rec.Code, http.StatusInternalServerError)
+	}
+}
+
 func TestPaging(t *testing.T) {
 	type page struct {
 		Items     []audience.User `json:"items"`
@@ -416,7 +478,7 @@ func TestPaging(t *testing.T) {
 	}
 	a, b, c := audience.User{ID: "a"}, audience.User{ID: "b"}, audience.User{ID: "c"}
 
-	// The store is always asked for one user more than the page holds, and that extra
+	// The repository is always asked for one user more than the page holds, and that extra
 	// user, when it comes back, is what produces next_after.
 	tests := []struct {
 		name      string
@@ -452,8 +514,8 @@ func TestPaging(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			cl, store := newTestAPI(t)
-			store.Users(gomock.Any(), testAppID, test.wantAsked).Return(test.stored, nil)
+			cl, repo := newTestAPI(t)
+			repo.Users(gomock.Any(), testAppID, test.wantAsked).Return(test.stored, nil)
 
 			var got page
 			if status := cl.call(t, "GET", test.path, "", &got); status != http.StatusOK {
@@ -477,9 +539,9 @@ func TestPagingRejectsBadLimits(t *testing.T) {
 }
 
 func TestEndpointBody(t *testing.T) {
-	c, store := newTestAPI(t)
+	c, repo := newTestAPI(t)
 	want := audience.Endpoint{ID: "e1", UserID: "ana", Address: "+5491100000000", Channel: audience.ChannelSMS, Provider: "twilio"}
-	store.Endpoint(gomock.Any(), testAppID, "e1").Return(want, nil)
+	repo.Endpoint(gomock.Any(), testAppID, "e1").Return(want, nil)
 
 	var got map[string]any
 	if status := c.call(t, "GET", "/v1/endpoints/e1", "", &got); status != http.StatusOK {
@@ -498,9 +560,9 @@ func TestEndpointBody(t *testing.T) {
 }
 
 func TestErrorBody(t *testing.T) {
-	c, store := newTestAPI(t)
-	store.List(gomock.Any(), testAppID, "l1").Return(audience.List{ID: "l1"}, nil)
-	store.KnownUsers(gomock.Any(), testAppID, []string{"ana", "nobody"}).Return([]string{"ana"}, nil)
+	c, repo := newTestAPI(t)
+	repo.List(gomock.Any(), testAppID, "l1").Return(audience.List{ID: "l1"}, nil)
+	repo.KnownUsers(gomock.Any(), testAppID, []string{"ana", "nobody"}).Return([]string{"ana"}, nil)
 
 	var got errorBody
 	c.call(t, "POST", "/v1/lists/l1/members", `{"user_ids": ["ana", "nobody"]}`, &got)
@@ -511,13 +573,13 @@ func TestErrorBody(t *testing.T) {
 }
 
 func TestInternalErrorsHideTheirCause(t *testing.T) {
-	c, store := newTestAPI(t)
-	store.User(gomock.Any(), testAppID, "ana").Return(audience.User{}, errors.New("password=hunter2 rejected"))
+	c, repo := newTestAPI(t)
+	repo.User(gomock.Any(), testAppID, "ana").Return(audience.User{}, errors.New("password=hunter2 rejected"))
 
 	var got errorBody
 	c.call(t, "GET", "/v1/users/ana", "", &got)
 	want := errorBody{Error: errorDetail{Code: "internal", Message: "internal error"}}
 	if got != want {
-		t.Errorf("GET /v1/users/ana with a failing store returned %+v, want %+v", got, want)
+		t.Errorf("GET /v1/users/ana with a failing repository returned %+v, want %+v", got, want)
 	}
 }

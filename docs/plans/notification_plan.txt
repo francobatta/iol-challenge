@@ -1,0 +1,173 @@
+# Notification delivery: endpoint, dispatcher, worker, scaling
+
+## Context
+
+The audience API (`notification-system/api`) stores apps, users, endpoints and lists but cannot
+send anything. This adds the send path. A global SQL job table contends under many tenants, and
+one queue per channel starves tenants and handles errors poorly, so the design is: durable
+RabbitMQ quorum queues, one per `(provider, app_id)`, consumed by one autoscaled worker pool
+per provider, with bounded backlogs, delayed retries, a dead-letter queue, job-level status
+counters and tracing.
+
+Design load: 10 tenants x 16M notifications/day, 3x daily peak.
+
+## Decisions from the interview
+
+| Topic | Decision |
+|---|---|
+| Queues | One quorum queue per `(provider, app_id)`: `notify.send.<provider>.<app_id>` |
+| Workers | One Deployment per provider consumes every tenant queue of that provider |
+| Targets | `user_ids` (up to 1000) and/or a `list_id`; fan-out is asynchronous |
+| Priority | `high` / `normal` on quorum queues (2 levels) |
+| Status | Job-level counters only (`queued`, `sent`, `failed`); failures live in the DLQ and logs |
+| Counter path | Workers publish result events; an aggregator batches them into Postgres |
+| Limits | Per-app daily quota at the API. No worker rate limiter; circuit breaker per `(app, provider)` on 429/5xx, exponential backoff via retry tiers |
+| Layout | New `worker` module (no DB). `cmd/dispatcher` in the `api` module |
+| Providers | `twilio`, `mailchimp`, `apns`, `fcm`, mimicked by a mock HTTP server (1ms-1s latency) |
+| Observability | slog with job/message IDs, Prometheus `/metrics`, OTel trace context in AMQP headers, OTLP export when configured. Compose stays lean |
+
+## Architecture
+
+```
+client -> api (POST /v1/notifications) -> Postgres jobs row (pending)
+                                       -> notify.dispatch            (job id, confirmed publish)
+dispatcher: fan-out   notify.dispatch -> page audience -> notify.send.<provider>.<app_id>
+worker pool (per provider): consume all notify.send.<provider>.* -> provider HTTP call
+     ok        -> result{sent}   -> notify.results, ack
+     retryable -> notify.retry.<tier> (TTL, dead-letters back to origin queue), ack
+     exhausted / permanent -> notify.dead + result{failed}, ack
+dispatcher: aggregator  notify.results -> batched UPDATE of job counters + daily usage
+dispatcher: sweeper     re-publishes jobs stuck in pending (covers a lost publish)
+```
+
+### RabbitMQ topology (`api/internal/broker`)
+
+- `notify.dispatch`, `notify.results`, `notify.dead`: quorum queues.
+- `notify.send.<provider>.<app_id>`: quorum, `x-max-length` 100000 with `overflow:
+  reject-publish`, delivery limit, dead-letter to `notify.dead`. Declared lazily by the
+  dispatcher before the first publish (idempotent, cached).
+- `notify.retry.<tier>` for 5s, 30s, 2m, 10m: a topic exchange plus a queue with a fixed
+  `x-message-ttl` that dead-letters to the default exchange. The worker publishes with routing
+  key = origin queue name, so an expired message returns to its own queue.
+- All publishes are persistent with publisher confirms.
+
+### API (`api`)
+
+- `POST /v1/notifications` -> 202 `{job_id, status}`. Body: `user_ids` and/or `list_id`,
+  `content {title, body}`, `priority` (`high`|`normal`, default `normal`), optional
+  `Idempotency-Key` header (unique per app).
+- `GET /v1/notifications/{job_id}`, `GET /v1/notifications` (keyset page, reuse `servePage`).
+- Quota: reject with 429 `quota_exceeded` when today's `usage_daily.queued` >= `apps.daily_quota`.
+  A job in flight may overshoot; that is accepted for simplicity.
+- Endpoint validation tightens: `provider` must be one of the four and match the channel
+  (sms->twilio, email->mailchimp, push->apns|fcm). Existing tests that use other providers change.
+- New package `internal/notify` (types, `Service`, `Store` interface, gomock mock in
+  `notifytest`), mirroring `internal/audience`. Routes are added to the `apps` mux in
+  `internal/api/api.go`; new sentinel `ErrQuotaExceeded` mapped in `writeError`.
+
+Schema additions in `api/db/schema.sql` (+ `queries.sql`, regenerate sqlc):
+
+```
+apps.daily_quota bigint NOT NULL DEFAULT 20000000
+jobs (app_id, job_id uuidv7, status, priority, target jsonb, content jsonb,
+      idempotency_key, fanout_cursor, queued, sent, failed, created_at, updated_at)
+      PK (app_id, job_id); UNIQUE (app_id, idempotency_key)
+usage_daily (app_id, day, queued)  PK (app_id, day)
+```
+
+Job status: `pending` -> `dispatching` -> `dispatched` -> `completed` (when
+`sent + failed >= queued`). Duplicate result events from redelivery can overcount slightly;
+this is documented, not prevented.
+
+### Dispatcher (`api/cmd/dispatcher`)
+
+One binary, three loops, safe to run with several replicas:
+
+- **Fan-out:** consumes `notify.dispatch`, pages users/list members and their endpoints by
+  keyset, publishes one delivery per endpoint, and saves `fanout_cursor` + `queued` every page.
+  If a send queue rejects the publish (full), it saves the cursor and re-queues the job through
+  a retry tier, freeing the slot for other tenants. Redelivery resumes from the cursor.
+- **Aggregator:** drains `notify.results` in batches (1000 events or 1s), applies one
+  `UPDATE ... FROM unnest(...)` for job counters and `usage_daily`, then acks the batch.
+- **Sweeper:** every 30s re-publishes jobs still `pending` after 1 minute
+  (`FOR UPDATE SKIP LOCKED`).
+
+Delivery message: `{message_id (job_id + endpoint_id), job_id, app_id, provider, address,
+content, priority}`, with AMQP `message-id`, `priority`, and `traceparent` / `x-attempt` headers.
+
+### Worker (`notification-system/worker`, new module)
+
+- `cmd/worker`: `PROVIDER` env selects the pool. Config: `AMQP_URL`, `RABBITMQ_API_URL`,
+  `PROVIDER_URL`, `CONCURRENCY` (200), `PREFETCH` (20 per queue).
+- `internal/consume`: polls the RabbitMQ management API every 5s for queues matching
+  `notify.send.<provider>.*` and subscribes to new ones. Per-queue prefetch gives round-robin
+  fairness between tenants; a pod-wide semaphore caps in-flight sends.
+- `internal/provider`: `Sender` interface and one HTTP client per provider, 3s timeout,
+  `message_id` sent as the idempotency key. Classifies results as ok / retryable (429, 5xx,
+  timeout) / permanent (4xx).
+- `internal/breaker`: `sony/gobreaker` per `(app, provider)`. While open, that queue's consumer
+  is paused and buffered messages are requeued without consuming an attempt.
+- Retry: attempt N goes to tier N; after the last tier the message goes to `notify.dead` and a
+  `failed` result is published. The retry copy is confirmed before the original is acked.
+- Graceful shutdown: stop consuming, finish in-flight sends, then close.
+- `cmd/mockprovider`: routes `/twilio`, `/mailchimp`, `/apns`, `/fcm`; sleeps 1ms-1s uniformly;
+  `ERROR_RATE` and `THROTTLE_RATE` envs produce 5xx and 429.
+
+### Observability
+
+Every service exposes `/metrics` (sends by provider and outcome, send latency histogram, retries,
+breaker state, fan-out pages, aggregator batch size). Trace context is injected by the API,
+carried in AMQP headers through dispatcher and worker, and exported over OTLP when
+`OTEL_EXPORTER_OTLP_ENDPOINT` is set. Logs carry `app_id`, `job_id`, `message_id`.
+
+## Scaling math (to be written into the spec)
+
+- Per tenant: 16M / 86,400s = 185 msg/s. Ten tenants: 1,850/s average, 5,550/s at 3x peak.
+- Mean provider latency of uniform(1ms, 1s) is about 0.5s, so in-flight sends = rate x 0.5:
+  about 925 average, about 2,780 at peak.
+- One pod at concurrency 200 delivers about 400 msg/s. Total pods across the four pools:
+  5 at average load, 14 at peak, about 18 with 25% headroom. The work is I/O-bound: roughly
+  250m CPU and 128Mi per pod.
+- KEDA `rabbitmq` trigger per provider (HTTP protocol, `useRegex`, `operation: sum` over
+  `^notify\.send\.<provider>\..+`), two triggers, KEDA takes the larger:
+  - `MessageRate`, target 300/s per pod (75% of capacity) for steady state;
+  - `QueueLength`, target 400 per pod (one second of pod capacity) to drain bursts.
+  `minReplicaCount: 1`, `maxReplicaCount: 20`, scale-down stabilization 120s.
+- Backlog is bounded: 40 queues x 100,000 messages x ~0.5KB is at most ~2GB on disk; a full
+  queue pushes back on the dispatcher, so pending work waits as a cursor in Postgres.
+- One 3-node RabbitMQ cluster carries the peak (about 5.5k/s sends plus 5.5k/s results).
+  Beyond roughly 100 tenants the plan would shard tenants across clusters; noted, not built.
+
+## Deliverables and order
+
+1. Design spec: `docs/superpowers/specs/2026-10-05-notification-delivery-design.md` (this
+   design plus the scaling math), reviewed before code.
+2. `api`: schema + sqlc, `internal/notify`, `internal/broker`, HTTP routes, quota, endpoint
+   provider validation, tests (TDD, gomock for stores, real Postgres/RabbitMQ tests skipped when
+   their env is unset, as `internal/postgres` does today).
+3. `api/cmd/dispatcher`: fan-out, aggregator, sweeper.
+4. `worker` module: `consume`, `provider`, `breaker`, `cmd/worker`, `cmd/mockprovider`,
+   Dockerfile. A golden-file test in each module pins the delivery and result JSON contract.
+5. `compose.yaml`: add `rabbitmq` (management image), `dispatcher`, `mockprovider`, and four
+   worker services from one image.
+6. `deploy/k8s/`: Deployments for api, dispatcher and the four worker pools, Service for the
+   API, four `ScaledObject`s plus a `TriggerAuthentication`, ConfigMap/Secret placeholders.
+
+Go code follows the `google-go-style` skill. No commits unless asked.
+
+## Verification
+
+- `go test ./...` in `api` and `worker`, with `DATABASE_URL` and `AMQP_URL` set against compose
+  so the integration tests run.
+- `docker compose up --build`; create an app, users, endpoints for all four providers and a
+  list; `POST /v1/notifications`; poll `GET /v1/notifications/{job_id}` until `completed` with
+  `sent == queued`.
+- Load: a list of ~50k members across two apps; confirm both apps progress concurrently
+  (fairness), `high` jobs overtake `normal`, and queue depth stays under the cap (RabbitMQ
+  management UI on :15672).
+- Failure paths: `THROTTLE_RATE=0.5` on the mock shows breaker opening and retry tiers filling;
+  `ERROR_RATE=1` ends in `notify.dead` with `failed` counted; `docker compose kill` a worker
+  mid-run and confirm no job loses messages.
+- Quota: set a small `daily_quota`, confirm 429 after it is used.
+- Manifests: `kubectl apply --dry-run=client -f deploy/k8s/`; check ScaledObject trigger fields
+  against the current KEDA rabbitmq scaler docs.

@@ -1,4 +1,36 @@
-# Local development only: the credentials below are placeholders, not secrets.
+# Local development only. The Go services are configured by api/.env and worker/.env,
+# whose credentials are placeholders, not secrets.
+#
+# There is no autoscaling here: each provider gets one worker. The Kubernetes manifests
+# in deploy/k8s scale the same images with KEDA.
+
+# Both images are built from this directory, because they share the commons module.
+x-api-image: &api-image
+  context: .
+  dockerfile: api/Dockerfile
+
+x-worker-image: &worker-image
+  context: .
+  dockerfile: worker/Dockerfile
+
+# What every Go service needs to reach the broker, and to come back if it loses it:
+# consumers exit when their connection drops.
+x-broker: &broker
+  restart: on-failure
+  depends_on: &broker-ready
+    rabbitmq:
+      condition: service_healthy
+
+# One worker image runs as four pools, one per provider. They differ only in PROVIDER.
+x-worker: &worker
+  <<: *broker
+  build: *worker-image
+  env_file: ./worker/.env
+  depends_on:
+    <<: *broker-ready
+    mockprovider:
+      condition: service_started
+
 services:
   db:
     image: postgres:18
@@ -17,14 +49,73 @@ services:
       timeout: 2s
       retries: 15
 
-  api:
-    build: ./api
+  rabbitmq:
+    # Pinned: how strictly high-priority messages overtake normal ones in a quorum
+    # queue differs between RabbitMQ versions. See the README.
+    image: rabbitmq:4.1-management
+    hostname: rabbitmq # the node's data directory is named after it
     environment:
-      DATABASE_URL: postgres://audience:audience@db:5432/audience
-      JWT_SECRET: dev-jwt-secret
-      ADMIN_KEY: dev-admin-key
+      RABBITMQ_DEFAULT_USER: notify
+      RABBITMQ_DEFAULT_PASS: notify
+    ports:
+      - "5672:5672"
+      - "15672:15672" # management UI and API
+      - "15692:15692" # metrics, from the rabbitmq_prometheus plugin the image enables
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  # Collects the metrics of the api, the workers and RabbitMQ: the state of each app on
+  # each provider. See deploy/prometheus/prometheus.yml.
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  api:
+    <<: *broker
+    build: *api-image
+    env_file: ./api/.env
     ports:
       - "8080:8080"
     depends_on:
+      <<: *broker-ready
       db:
         condition: service_healthy
+
+  # Stands in for Twilio, Mailchimp, APNs and FCM. Set ERROR_RATE or THROTTLE_RATE
+  # (0 to 1) in the shell that runs compose to make it answer 500 or 429 that often;
+  # that overrides worker/.env.
+  mockprovider:
+    build: *worker-image
+    entrypoint: ["/mockprovider"]
+    env_file: ./worker/.env
+    environment:
+      ERROR_RATE: ${ERROR_RATE:-0}
+      THROTTLE_RATE: ${THROTTLE_RATE:-0}
+    ports:
+      - "8081:8081"
+
+  worker-twilio:
+    <<: *worker
+    environment:
+      PROVIDER: twilio
+
+  worker-mailchimp:
+    <<: *worker
+    environment:
+      PROVIDER: mailchimp
+
+  worker-apns:
+    <<: *worker
+    environment:
+      PROVIDER: apns
+
+  worker-fcm:
+    <<: *worker
+    environment:
+      PROVIDER: fcm

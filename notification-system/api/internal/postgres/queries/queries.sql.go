@@ -29,9 +29,100 @@ func (q *Queries) AddMembers(ctx context.Context, arg AddMembersParams) error {
 	return err
 }
 
+const advanceFanout = `-- name: AdvanceFanout :execrows
+WITH advanced AS (
+    UPDATE fanouts f
+    SET user_cursor = $2, run_after = now() + make_interval(secs => $3)
+    WHERE f.app_id = $4 AND f.job_id = $5 AND f.user_cursor = $6
+    RETURNING f.app_id, f.job_id
+), counted AS (
+    UPDATE jobs j
+    SET status = 'dispatching', queued = j.queued + $1, updated_at = now()
+    FROM advanced a
+    WHERE j.app_id = a.app_id AND j.job_id = a.job_id
+)
+INSERT INTO usage_daily (app_id, day, queued)
+SELECT a.app_id, current_date, $1 FROM advanced a
+ON CONFLICT (app_id, day) DO UPDATE SET queued = usage_daily.queued + EXCLUDED.queued
+`
+
+type AdvanceFanoutParams struct {
+	Published      int64
+	UserCursor     string
+	LeaseSecs      float64
+	AppID          pgtype.UUID
+	JobID          pgtype.UUID
+	PreviousCursor string
+}
+
+// One statement, so the cursor, the job's count and the app's usage move together. It
+// also renews the lease. Nothing changes, and no row is affected, unless the cursor is
+// still at @previous_cursor: a dispatcher that lost its lease must not count a page twice.
+func (q *Queries) AdvanceFanout(ctx context.Context, arg AdvanceFanoutParams) (int64, error) {
+	result, err := q.db.Exec(ctx, advanceFanout,
+		arg.Published,
+		arg.UserCursor,
+		arg.LeaseSecs,
+		arg.AppID,
+		arg.JobID,
+		arg.PreviousCursor,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const claimFanout = `-- name: ClaimFanout :one
+WITH claimed AS (
+    UPDATE fanouts f
+    SET run_after = now() + make_interval(secs => $1)
+    WHERE (f.app_id, f.job_id) = (
+        SELECT d.app_id, d.job_id FROM fanouts d
+        WHERE d.run_after <= now()
+        ORDER BY d.run_after
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED
+    )
+    RETURNING f.app_id, f.job_id, f.user_cursor
+)
+SELECT c.app_id, c.job_id, c.user_cursor, j.priority, j.user_ids, j.list_id, j.title, j.body
+FROM claimed c
+JOIN jobs j ON j.app_id = c.app_id AND j.job_id = c.job_id
+`
+
+type ClaimFanoutRow struct {
+	AppID      pgtype.UUID
+	JobID      pgtype.UUID
+	UserCursor string
+	Priority   string
+	UserIds    []string
+	ListID     pgtype.UUID
+	Title      string
+	Body       string
+}
+
+// Takes the fan-out that has been due longest and keeps the others off it for the lease.
+// SKIP LOCKED makes dispatchers that claim at the same moment take different ones.
+func (q *Queries) ClaimFanout(ctx context.Context, leaseSecs float64) (ClaimFanoutRow, error) {
+	row := q.db.QueryRow(ctx, claimFanout, leaseSecs)
+	var i ClaimFanoutRow
+	err := row.Scan(
+		&i.AppID,
+		&i.JobID,
+		&i.UserCursor,
+		&i.Priority,
+		&i.UserIds,
+		&i.ListID,
+		&i.Title,
+		&i.Body,
+	)
+	return i, err
+}
+
 const createApp = `-- name: CreateApp :one
 
-INSERT INTO apps (name) VALUES ($1) RETURNING app_id, name, created_at
+INSERT INTO apps (name) VALUES ($1) RETURNING app_id, name, created_at, daily_quota
 `
 
 // Queries compiled by sqlc into internal/postgres/queries.
@@ -39,7 +130,12 @@ INSERT INTO apps (name) VALUES ($1) RETURNING app_id, name, created_at
 func (q *Queries) CreateApp(ctx context.Context, name string) (App, error) {
 	row := q.db.QueryRow(ctx, createApp, name)
 	var i App
-	err := row.Scan(&i.AppID, &i.Name, &i.CreatedAt)
+	err := row.Scan(
+		&i.AppID,
+		&i.Name,
+		&i.CreatedAt,
+		&i.DailyQuota,
+	)
 	return i, err
 }
 
@@ -222,6 +318,186 @@ func (q *Queries) Endpoints(ctx context.Context, arg EndpointsParams) ([]Endpoin
 	return items, nil
 }
 
+const fanoutPage = `-- name: FanoutPage :many
+WITH page AS (
+    SELECT t.user_id FROM (
+        (SELECT m.user_id FROM list_members m
+         WHERE m.app_id = $1 AND m.list_id = $2 AND m.user_id > $3
+         ORDER BY m.user_id LIMIT $4)
+        UNION
+        (SELECT u.user_id FROM unnest($5::text[]) AS u(user_id)
+         WHERE u.user_id > $3
+         ORDER BY u.user_id LIMIT $4)
+    ) t
+    ORDER BY t.user_id
+    LIMIT $4
+)
+SELECT p.user_id::text AS user_id, e.endpoint_id, e.channel, e.provider, e.address
+FROM page p
+LEFT JOIN endpoints e ON e.app_id = $1 AND e.user_id = p.user_id
+ORDER BY p.user_id, e.endpoint_id
+`
+
+type FanoutPageParams struct {
+	AppID    pgtype.UUID
+	ListID   pgtype.UUID
+	After    string
+	MaxUsers int32
+	UserIds  []string
+}
+
+type FanoutPageRow struct {
+	UserID     string
+	EndpointID pgtype.UUID
+	Channel    pgtype.Text
+	Provider   pgtype.Text
+	Address    pgtype.Text
+}
+
+// The next @max_users users of a job's audience after @after, each once, with their
+// endpoints: one row per endpoint, and a row without one for a user that has none, so
+// that the caller sees every user the page covers.
+//
+// It is three index range scans and no more. The members come in order from the primary
+// key of list_members, the named users need no table at all, and the endpoints of the
+// page are one range of endpoints_fanout_idx. Each branch is limited on its own so that
+// it stops after one page.
+func (q *Queries) FanoutPage(ctx context.Context, arg FanoutPageParams) ([]FanoutPageRow, error) {
+	rows, err := q.db.Query(ctx, fanoutPage,
+		arg.AppID,
+		arg.ListID,
+		arg.After,
+		arg.MaxUsers,
+		arg.UserIds,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []FanoutPageRow
+	for rows.Next() {
+		var i FanoutPageRow
+		if err := rows.Scan(
+			&i.UserID,
+			&i.EndpointID,
+			&i.Channel,
+			&i.Provider,
+			&i.Address,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const finishFanout = `-- name: FinishFanout :execrows
+WITH finished AS (
+    DELETE FROM fanouts f
+    WHERE f.app_id = $2 AND f.job_id = $3 AND f.user_cursor = $4
+    RETURNING f.app_id, f.job_id
+), counted AS (
+    UPDATE jobs j
+    SET status = 'dispatched', queued = j.queued + $1, updated_at = now()
+    FROM finished f
+    WHERE j.app_id = f.app_id AND j.job_id = f.job_id
+)
+INSERT INTO usage_daily (app_id, day, queued)
+SELECT f.app_id, current_date, $1 FROM finished f
+ON CONFLICT (app_id, day) DO UPDATE SET queued = usage_daily.queued + EXCLUDED.queued
+`
+
+type FinishFanoutParams struct {
+	Published      int64
+	AppID          pgtype.UUID
+	JobID          pgtype.UUID
+	PreviousCursor string
+}
+
+// AdvanceFanout for the last page: instead of moving the cursor it deletes the fan-out.
+func (q *Queries) FinishFanout(ctx context.Context, arg FinishFanoutParams) (int64, error) {
+	result, err := q.db.Exec(ctx, finishFanout,
+		arg.Published,
+		arg.AppID,
+		arg.JobID,
+		arg.PreviousCursor,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const insertJob = `-- name: InsertJob :one
+WITH job AS (
+    INSERT INTO jobs (app_id, priority, user_ids, list_id, title, body, idempotency_key)
+    VALUES ($1, $2, $3, $4, $5, $6, $7)
+    ON CONFLICT (app_id, idempotency_key) DO NOTHING
+    RETURNING app_id, job_id, status, priority, user_ids, list_id, title, body, idempotency_key, queued, created_at, updated_at
+), fanout AS (
+    INSERT INTO fanouts (app_id, job_id) SELECT job.app_id, job.job_id FROM job
+)
+SELECT app_id, job_id, status, priority, user_ids, list_id, title, body, idempotency_key, queued, created_at, updated_at FROM job
+`
+
+type InsertJobParams struct {
+	AppID          pgtype.UUID
+	Priority       string
+	UserIds        []string
+	ListID         pgtype.UUID
+	Title          string
+	Body           string
+	IdempotencyKey pgtype.Text
+}
+
+type InsertJobRow struct {
+	AppID          pgtype.UUID
+	JobID          pgtype.UUID
+	Status         string
+	Priority       string
+	UserIds        []string
+	ListID         pgtype.UUID
+	Title          string
+	Body           string
+	IdempotencyKey pgtype.Text
+	Queued         int64
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+// Stores a job together with the fan-out it is owed. Returns no row when the app has
+// already used the idempotency key.
+func (q *Queries) InsertJob(ctx context.Context, arg InsertJobParams) (InsertJobRow, error) {
+	row := q.db.QueryRow(ctx, insertJob,
+		arg.AppID,
+		arg.Priority,
+		arg.UserIds,
+		arg.ListID,
+		arg.Title,
+		arg.Body,
+		arg.IdempotencyKey,
+	)
+	var i InsertJobRow
+	err := row.Scan(
+		&i.AppID,
+		&i.JobID,
+		&i.Status,
+		&i.Priority,
+		&i.UserIds,
+		&i.ListID,
+		&i.Title,
+		&i.Body,
+		&i.IdempotencyKey,
+		&i.Queued,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const insertUser = `-- name: InsertUser :execrows
 INSERT INTO users (app_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING
 `
@@ -237,6 +513,110 @@ func (q *Queries) InsertUser(ctx context.Context, arg InsertUserParams) (int64, 
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const job = `-- name: Job :one
+SELECT app_id, job_id, status, priority, user_ids, list_id, title, body, idempotency_key, queued, created_at, updated_at FROM jobs WHERE app_id = $1 AND job_id = $2
+`
+
+type JobParams struct {
+	AppID pgtype.UUID
+	JobID pgtype.UUID
+}
+
+func (q *Queries) Job(ctx context.Context, arg JobParams) (Job, error) {
+	row := q.db.QueryRow(ctx, job, arg.AppID, arg.JobID)
+	var i Job
+	err := row.Scan(
+		&i.AppID,
+		&i.JobID,
+		&i.Status,
+		&i.Priority,
+		&i.UserIds,
+		&i.ListID,
+		&i.Title,
+		&i.Body,
+		&i.IdempotencyKey,
+		&i.Queued,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const jobByIdempotencyKey = `-- name: JobByIdempotencyKey :one
+SELECT app_id, job_id, status, priority, user_ids, list_id, title, body, idempotency_key, queued, created_at, updated_at FROM jobs WHERE app_id = $1 AND idempotency_key = $2
+`
+
+type JobByIdempotencyKeyParams struct {
+	AppID          pgtype.UUID
+	IdempotencyKey pgtype.Text
+}
+
+func (q *Queries) JobByIdempotencyKey(ctx context.Context, arg JobByIdempotencyKeyParams) (Job, error) {
+	row := q.db.QueryRow(ctx, jobByIdempotencyKey, arg.AppID, arg.IdempotencyKey)
+	var i Job
+	err := row.Scan(
+		&i.AppID,
+		&i.JobID,
+		&i.Status,
+		&i.Priority,
+		&i.UserIds,
+		&i.ListID,
+		&i.Title,
+		&i.Body,
+		&i.IdempotencyKey,
+		&i.Queued,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const jobs = `-- name: Jobs :many
+SELECT app_id, job_id, status, priority, user_ids, list_id, title, body, idempotency_key, queued, created_at, updated_at FROM jobs
+WHERE app_id = $1 AND job_id > $2
+ORDER BY job_id
+LIMIT $3
+`
+
+type JobsParams struct {
+	AppID   pgtype.UUID
+	After   pgtype.UUID
+	MaxRows int32
+}
+
+func (q *Queries) Jobs(ctx context.Context, arg JobsParams) ([]Job, error) {
+	rows, err := q.db.Query(ctx, jobs, arg.AppID, arg.After, arg.MaxRows)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Job
+	for rows.Next() {
+		var i Job
+		if err := rows.Scan(
+			&i.AppID,
+			&i.JobID,
+			&i.Status,
+			&i.Priority,
+			&i.UserIds,
+			&i.ListID,
+			&i.Title,
+			&i.Body,
+			&i.IdempotencyKey,
+			&i.Queued,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const knownUsers = `-- name: KnownUsers :many
@@ -371,6 +751,25 @@ func (q *Queries) Members(ctx context.Context, arg MembersParams) ([]MembersRow,
 		return nil, err
 	}
 	return items, nil
+}
+
+const quota = `-- name: Quota :one
+SELECT a.daily_quota, COALESCE(u.queued, 0)::bigint AS used
+FROM apps a
+LEFT JOIN usage_daily u ON u.app_id = a.app_id AND u.day = current_date
+WHERE a.app_id = $1
+`
+
+type QuotaRow struct {
+	DailyQuota int64
+	Used       int64
+}
+
+func (q *Queries) Quota(ctx context.Context, appID pgtype.UUID) (QuotaRow, error) {
+	row := q.db.QueryRow(ctx, quota, appID)
+	var i QuotaRow
+	err := row.Scan(&i.DailyQuota, &i.Used)
+	return i, err
 }
 
 const removeMember = `-- name: RemoveMember :exec

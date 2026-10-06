@@ -1,0 +1,36 @@
+ Tell me in more detail how the dispatcher is currently working. For a notification that has entered and has 1 million destinataries (users of an app), how many records will be inserted in pg, and how many work will the fanout worker do?
+***
+[⧉ In notifications.go] I am checking the POST of a notification flow (i.e. a job). What is the current logic and parts
+  for this?
+***
+Let's simplify this flow. Instead of creating the message and having a 'dispatcher' abstraction,
+  have api:
+  1. Create another row in a pg jobs table correctly refering to the notification event, with the user cursor
+  2. Create the messages using a very efficient users table navigation. Instead of making 2000 queries if we want to send
+  a notification to 2000 users, we should use one query and retrieve the whole dataset using indexes like BRIN or
+  something ordered in favor of index searches, and having the users conveniently arranged as to have said query be fast
+  and avoid N+1
+  3. Have api have dispatcher goroutines that periodically fan-out and create the messages sent to the corresponding
+  rabbit queues.
+
+  This makes the design simpler, makes use of goroutines and pg rows (with a cron or similar abstraction, native to
+  goroutines) instead of a publish of an event to rabbit, and keeps components smaller.
+
+  For this task avoid large plans, and make sure the resulting abstractions are simpler and more maintainable, avoiding
+  unnecessary round trips, avoiding outboxes (unless it's necessary - like the job cursor row) and avoiding N+1.
+***
+Now let's tackle the countResults (aggregator) concern. We have a results queue (notify.results) which is the way we
+  are currently effectively knowing that a worker has processed an event. Let's remove that abstraction altogether,
+  saving a round trip of message processing, and instead create:
+  *queue visibility for the rabbit MQ deployable using rabbitmq_prometheus
+  *the workers are in charge of updating the status of (provider, app) at prometheus.
+
+  Combining this with the job metadata at postgres, we do not need any 'aggregator' component, and we can provide a way
+  to *in the future* see the metrics per app, per provider in a simple frontend UI.
+
+  For this task keep simplicity, cohesiveness as priorities.
+***
+/clear
+***
+Commit and push everything to main
+***

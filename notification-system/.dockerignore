@@ -1,0 +1,5 @@
+**/.env
+**/*_test.go
+**/testdata
+deploy
+README.md

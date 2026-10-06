@@ -16,9 +16,9 @@ import (
 // These tests need a PostgreSQL database with db/schema.sql loaded, such as the one
 // "docker compose up -d db" starts, and are skipped unless DATABASE_URL points to it.
 
-// newTestStore returns a Store on the test database and the ID of a new app, so that
+// newTestStore returns a Repository on the test database and the ID of a new app, so that
 // each test works on data of its own.
-func newTestStore(ctx context.Context, t *testing.T) (s *Store, appID string) {
+func newTestStore(ctx context.Context, t *testing.T) (s *Repository, appID string) {
 	t.Helper()
 	url := os.Getenv("DATABASE_URL")
 	if url == "" {
@@ -29,7 +29,7 @@ func newTestStore(ctx context.Context, t *testing.T) (s *Store, appID string) {
 		t.Fatalf("Setup: connecting to DATABASE_URL: %v", err)
 	}
 	t.Cleanup(pool.Close)
-	s = NewStore(pool)
+	s = NewRepository(pool)
 	app, err := s.CreateApp(ctx, t.Name())
 	if err != nil {
 		t.Fatalf("Setup: CreateApp failed: %v", err)
@@ -37,7 +37,7 @@ func newTestStore(ctx context.Context, t *testing.T) (s *Store, appID string) {
 	return s, app.ID
 }
 
-func mustPutUsers(ctx context.Context, t *testing.T, s *Store, appID string, userIDs ...string) {
+func mustPutUsers(ctx context.Context, t *testing.T, s *Repository, appID string, userIDs ...string) {
 	t.Helper()
 	for _, id := range userIDs {
 		if _, _, err := s.PutUser(ctx, appID, id); err != nil {
@@ -93,9 +93,9 @@ func TestEndpoints(t *testing.T) {
 	ctx := t.Context()
 	s, appID := newTestStore(ctx, t)
 	mustPutUsers(ctx, t, s, appID, "ana")
-	email := audience.Endpoint{UserID: "ana", Address: "ana@example.com", Channel: audience.ChannelEmail, Provider: "ses"}
+	email := audience.Endpoint{UserID: "ana", Address: "ana@example.com", Channel: audience.ChannelEmail, Provider: "mailchimp"}
 
-	if _, err := s.CreateEndpoint(ctx, appID, audience.Endpoint{UserID: "nobody", Address: "x", Channel: audience.ChannelSMS, Provider: "p"}); !errors.Is(err, audience.ErrNotFound) {
+	if _, err := s.CreateEndpoint(ctx, appID, audience.Endpoint{UserID: "nobody", Address: "x", Channel: audience.ChannelSMS, Provider: "twilio"}); !errors.Is(err, audience.ErrNotFound) {
 		t.Errorf("CreateEndpoint(unknown user) = _, %v, want ErrNotFound", err)
 	}
 	created, err := s.CreateEndpoint(ctx, appID, email)

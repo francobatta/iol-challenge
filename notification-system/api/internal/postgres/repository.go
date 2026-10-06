@@ -1,4 +1,4 @@
-// Package postgres stores the audience in PostgreSQL.
+// Package postgres stores the audience and the notification jobs in PostgreSQL.
 //
 // The SQL lives in db/queries.sql and is compiled by sqlc into the queries package;
 // run "sqlc generate" after changing it.
@@ -23,14 +23,15 @@ const (
 	uniqueViolation     = "23505"
 )
 
-// A Store is an audience.Store backed by PostgreSQL.
-type Store struct {
+// A Repository implements the Repository interfaces of the audience, notify and
+// dispatch packages on PostgreSQL. Their contracts are documented there.
+type Repository struct {
 	q *queries.Queries
 }
 
-// NewStore returns a Store that runs its queries on db, normally a *pgxpool.Pool.
-func NewStore(db queries.DBTX) *Store {
-	return &Store{q: queries.New(db)}
+// NewRepository returns a Repository that runs its queries on db, normally a *pgxpool.Pool.
+func NewRepository(db queries.DBTX) *Repository {
+	return &Repository{q: queries.New(db)}
 }
 
 // translate turns a database error into the audience error it stands for. missing
@@ -95,7 +96,7 @@ func toList(row queries.List) audience.List {
 	}
 }
 
-func (s *Store) CreateApp(ctx context.Context, name string) (audience.App, error) {
+func (s *Repository) CreateApp(ctx context.Context, name string) (audience.App, error) {
 	row, err := s.q.CreateApp(ctx, name)
 	if err != nil {
 		return audience.App{}, err
@@ -103,7 +104,7 @@ func (s *Store) CreateApp(ctx context.Context, name string) (audience.App, error
 	return audience.App{ID: row.AppID.String(), Name: row.Name, CreatedAt: row.CreatedAt}, nil
 }
 
-func (s *Store) PutUser(ctx context.Context, appID, userID string) (audience.User, bool, error) {
+func (s *Repository) PutUser(ctx context.Context, appID, userID string) (audience.User, bool, error) {
 	inserted, err := s.q.InsertUser(ctx, queries.InsertUserParams{AppID: toUUID(appID), UserID: userID})
 	if err != nil {
 		return audience.User{}, false, translate(err, "app")
@@ -112,7 +113,7 @@ func (s *Store) PutUser(ctx context.Context, appID, userID string) (audience.Use
 	return u, inserted == 1, err
 }
 
-func (s *Store) User(ctx context.Context, appID, userID string) (audience.User, error) {
+func (s *Repository) User(ctx context.Context, appID, userID string) (audience.User, error) {
 	row, err := s.q.User(ctx, queries.UserParams{AppID: toUUID(appID), UserID: userID})
 	if err != nil {
 		return audience.User{}, translate(err, "user")
@@ -120,7 +121,7 @@ func (s *Store) User(ctx context.Context, appID, userID string) (audience.User, 
 	return toUser(row), nil
 }
 
-func (s *Store) Users(ctx context.Context, appID string, p audience.Page) ([]audience.User, error) {
+func (s *Repository) Users(ctx context.Context, appID string, p audience.Page) ([]audience.User, error) {
 	rows, err := s.q.Users(ctx, queries.UsersParams{
 		AppID:   toUUID(appID),
 		After:   p.After,
@@ -136,11 +137,11 @@ func (s *Store) Users(ctx context.Context, appID string, p audience.Page) ([]aud
 	return users, nil
 }
 
-func (s *Store) KnownUsers(ctx context.Context, appID string, userIDs []string) ([]string, error) {
+func (s *Repository) KnownUsers(ctx context.Context, appID string, userIDs []string) ([]string, error) {
 	return s.q.KnownUsers(ctx, queries.KnownUsersParams{AppID: toUUID(appID), UserIds: userIDs})
 }
 
-func (s *Store) DeleteUser(ctx context.Context, appID, userID string) error {
+func (s *Repository) DeleteUser(ctx context.Context, appID, userID string) error {
 	deleted, err := s.q.DeleteUser(ctx, queries.DeleteUserParams{AppID: toUUID(appID), UserID: userID})
 	if err != nil {
 		return err
@@ -151,7 +152,7 @@ func (s *Store) DeleteUser(ctx context.Context, appID, userID string) error {
 	return nil
 }
 
-func (s *Store) CreateEndpoint(ctx context.Context, appID string, e audience.Endpoint) (audience.Endpoint, error) {
+func (s *Repository) CreateEndpoint(ctx context.Context, appID string, e audience.Endpoint) (audience.Endpoint, error) {
 	row, err := s.q.CreateEndpoint(ctx, queries.CreateEndpointParams{
 		AppID:    toUUID(appID),
 		UserID:   e.UserID,
@@ -165,7 +166,7 @@ func (s *Store) CreateEndpoint(ctx context.Context, appID string, e audience.End
 	return toEndpoint(row), nil
 }
 
-func (s *Store) Endpoint(ctx context.Context, appID, endpointID string) (audience.Endpoint, error) {
+func (s *Repository) Endpoint(ctx context.Context, appID, endpointID string) (audience.Endpoint, error) {
 	row, err := s.q.Endpoint(ctx, queries.EndpointParams{AppID: toUUID(appID), EndpointID: toUUID(endpointID)})
 	if err != nil {
 		return audience.Endpoint{}, translate(err, "endpoint")
@@ -173,7 +174,7 @@ func (s *Store) Endpoint(ctx context.Context, appID, endpointID string) (audienc
 	return toEndpoint(row), nil
 }
 
-func (s *Store) Endpoints(ctx context.Context, appID, userID string, p audience.Page) ([]audience.Endpoint, error) {
+func (s *Repository) Endpoints(ctx context.Context, appID, userID string, p audience.Page) ([]audience.Endpoint, error) {
 	rows, err := s.q.Endpoints(ctx, queries.EndpointsParams{
 		AppID:   toUUID(appID),
 		UserID:  userID,
@@ -190,7 +191,7 @@ func (s *Store) Endpoints(ctx context.Context, appID, userID string, p audience.
 	return endpoints, nil
 }
 
-func (s *Store) UpdateEndpoint(ctx context.Context, appID string, e audience.Endpoint) (audience.Endpoint, error) {
+func (s *Repository) UpdateEndpoint(ctx context.Context, appID string, e audience.Endpoint) (audience.Endpoint, error) {
 	row, err := s.q.UpdateEndpoint(ctx, queries.UpdateEndpointParams{
 		AppID:      toUUID(appID),
 		EndpointID: toUUID(e.ID),
@@ -204,7 +205,7 @@ func (s *Store) UpdateEndpoint(ctx context.Context, appID string, e audience.End
 	return toEndpoint(row), nil
 }
 
-func (s *Store) DeleteEndpoint(ctx context.Context, appID, endpointID string) error {
+func (s *Repository) DeleteEndpoint(ctx context.Context, appID, endpointID string) error {
 	deleted, err := s.q.DeleteEndpoint(ctx, queries.DeleteEndpointParams{AppID: toUUID(appID), EndpointID: toUUID(endpointID)})
 	if err != nil {
 		return err
@@ -215,7 +216,7 @@ func (s *Store) DeleteEndpoint(ctx context.Context, appID, endpointID string) er
 	return nil
 }
 
-func (s *Store) CreateList(ctx context.Context, appID string, l audience.List) (audience.List, error) {
+func (s *Repository) CreateList(ctx context.Context, appID string, l audience.List) (audience.List, error) {
 	row, err := s.q.CreateList(ctx, queries.CreateListParams{
 		AppID:       toUUID(appID),
 		Name:        l.Name,
@@ -227,7 +228,7 @@ func (s *Store) CreateList(ctx context.Context, appID string, l audience.List) (
 	return toList(row), nil
 }
 
-func (s *Store) List(ctx context.Context, appID, listID string) (audience.List, error) {
+func (s *Repository) List(ctx context.Context, appID, listID string) (audience.List, error) {
 	row, err := s.q.List(ctx, queries.ListParams{AppID: toUUID(appID), ListID: toUUID(listID)})
 	if err != nil {
 		return audience.List{}, translate(err, "list")
@@ -235,7 +236,7 @@ func (s *Store) List(ctx context.Context, appID, listID string) (audience.List, 
 	return toList(row), nil
 }
 
-func (s *Store) Lists(ctx context.Context, appID string, p audience.Page) ([]audience.List, error) {
+func (s *Repository) Lists(ctx context.Context, appID string, p audience.Page) ([]audience.List, error) {
 	rows, err := s.q.Lists(ctx, queries.ListsParams{
 		AppID:   toUUID(appID),
 		After:   afterUUID(p.After),
@@ -251,7 +252,7 @@ func (s *Store) Lists(ctx context.Context, appID string, p audience.Page) ([]aud
 	return lists, nil
 }
 
-func (s *Store) UpdateList(ctx context.Context, appID string, l audience.List) (audience.List, error) {
+func (s *Repository) UpdateList(ctx context.Context, appID string, l audience.List) (audience.List, error) {
 	row, err := s.q.UpdateList(ctx, queries.UpdateListParams{
 		AppID:       toUUID(appID),
 		ListID:      toUUID(l.ID),
@@ -264,7 +265,7 @@ func (s *Store) UpdateList(ctx context.Context, appID string, l audience.List) (
 	return toList(row), nil
 }
 
-func (s *Store) DeleteList(ctx context.Context, appID, listID string) error {
+func (s *Repository) DeleteList(ctx context.Context, appID, listID string) error {
 	deleted, err := s.q.DeleteList(ctx, queries.DeleteListParams{AppID: toUUID(appID), ListID: toUUID(listID)})
 	if err != nil {
 		return err
@@ -275,7 +276,7 @@ func (s *Store) DeleteList(ctx context.Context, appID, listID string) error {
 	return nil
 }
 
-func (s *Store) AddMembers(ctx context.Context, appID, listID string, userIDs []string) error {
+func (s *Repository) AddMembers(ctx context.Context, appID, listID string, userIDs []string) error {
 	// A single INSERT, so the foreign keys make it all-or-nothing without a transaction.
 	err := s.q.AddMembers(ctx, queries.AddMembersParams{
 		AppID:   toUUID(appID),
@@ -285,7 +286,7 @@ func (s *Store) AddMembers(ctx context.Context, appID, listID string, userIDs []
 	return translate(err, "list or user")
 }
 
-func (s *Store) RemoveMember(ctx context.Context, appID, listID, userID string) error {
+func (s *Repository) RemoveMember(ctx context.Context, appID, listID, userID string) error {
 	return s.q.RemoveMember(ctx, queries.RemoveMemberParams{
 		AppID:  toUUID(appID),
 		ListID: toUUID(listID),
@@ -293,7 +294,7 @@ func (s *Store) RemoveMember(ctx context.Context, appID, listID, userID string) 
 	})
 }
 
-func (s *Store) Members(ctx context.Context, appID, listID string, p audience.Page) ([]audience.Member, error) {
+func (s *Repository) Members(ctx context.Context, appID, listID string, p audience.Page) ([]audience.Member, error) {
 	rows, err := s.q.Members(ctx, queries.MembersParams{
 		AppID:   toUUID(appID),
 		ListID:  toUUID(listID),

@@ -2,3 +2,82 @@
 ***
 I understand you have opted for manual mocks. Let's use gomock for terse mocks, less code and
   less boilerplate
+***
+commit only
+***
+In the @notification-system/api/internal/api/api.go instead of using manual (parameter-based)
+  middleware, why don't we use context if successful to pass the values down the handler chain? If
+  the refactor makes sense, apply it. If not, state why.
+***
+Because we will be using cross-cutting concerns in the future (logging, rate limiting, etc.)
+  please make a refactor keeping the style best practices in mind (not a pure context refactor if
+  senseless).
+***
+/clear
+***
+<plan mode>
+We have implemented a first version of the notification API. For now, the API accepts new apps,
+  users, user lists, and endpoints.
+
+  Now we need to design the actual notification endpoint and handling of said notifications. For
+  that, the naive approach is to have either a) a job reading a global SQL table of jobs/messages
+  pending, or b) worker queues per notification strategy (sms, email, etc.)
+
+  While (a) is correct and viable for a small-ish service, multiple tenants scanning the table and
+  updating may result in high contention; (b) is naive in regards to starvation, potential rate
+  limiting against providers, timeouts, error handling and at-least-once semantics. If we are going to use queues,
+  we need them to be effectively distributed to avoid bottlenecks and starvation and bad error handling.
+
+  We must propose an implementation that addresses the limitations in (a) and (b), have it be
+  easily scalable (simple, i'm thinking KEDA or similar) while avoiding problems of millions of
+  pending messages, and have a more robust error handling while having the possibility of tracing,
+  observability and event status tracking in a simple way.
+
+  My idea is to use rabbitMQ with disk persistence (to avoid lost messages, support deadlettering and support ACKs), one queue per (app_id, provider) tuple.
+  To avoid starvation, using one queue per tuple is OK. To avoid intra-queue starvation and support of high priority notifications, use a priority header based on the notification job metadata (provided by the app client).
+
+  To scale up message sending, scale up workers consuming a certain queue based on querying its length (the query is received by KEDA). To efficiently scale up the workers, know that we will deliver 16 million notifications PER TENANT PER DAY with reasonable time frames (latency <1s for each notification processing) and reasonable cloud costs and worker count.
+  When a notification is sent, the worker ACKs if sent correctly, and thus the message is erased from rabbitMQ's disk. There is a cron job or other similar mature mechanism at api updating the job metadata for each job, updating the rate limits and current usage (avoid overengineering this part - simple and performant first).
+
+  Let's plan this task, ping-pong alternatives, discuss potential pitfalls or alternatives, discuss a new service (or not) for this
+  requirement, and interview in the process.
+For the worker, we will have it fully implemented, minimal compose implementation working. Providers: mimicry of
+     twilio, mailchimp, ios and android for example. Have the provider processing take from 1ms to 1s at
+     random to have some rough idea of the real provider latency. KEDA manifests (Deployment,
+     ScaledObjects, Service, etc. if needed). Scaling math is documented
+***
+The API rejects requests once an app exceeds its daily allowance, based on usage counters the
+     periodic job maintains. Workers send as fast as concurrency allows and rely on provider 429s plus retry.
+     Use a circuit breaker to avoid overwhelming the providers with 429s and exponential backoff for messages
+     in the DLQ
+***
+❯ Don't write more plans. Just use the @docs/superpowers/specs/2026-10-05-notification-delivery-design.md
+  and @docs/plans/notification_plan.txt to write the actual code
+***
+/clear
+***
+Refactor all applications to use https://github.com/caarlos0/env, a small config library so we do not rely exclusively
+  on environment variables for config values. Have the library parse the env variables.
+
+  Doing this refactor will result in using a .env file inside all apps, and then convert to k8s config maps using
+  --from-env-file conveniently. This will result in less clutter, more readable configs
+***
+Because this is a didactic, simple system, include the secrets in the configmap. Doing real secrets with k8s would mean
+  using a third-party client to store them, and this is out of scope and cumbersome. Rest looks OK.
+***
+Refactor all go apps to use chi, and have more streamlined 'main' and service, repo layers. This, along with the config
+  refactor, is expected to bring the app to a more readable, mature state. Use a 'dependencies.go' approach to declare
+  all the object graph in a very SIMPLE way, reading envs as needed, then make use of simple, readable, predictable
+  layers to structure the code.
+  ***
+  Implement the F1 as a commons lib, this is a small module that is imported by one or more services.
+  F2: add to F1 too, KISS.
+  F4: do not change, this is very small and the code duplication at start-up and teardown is expected for this scope.
+  F5: reduce comments, remove unnecessary/self-explaining/evident comments. In contracts, comments are OK. In
+  implementation, unless remarkable or worthwhile, no comments.
+  F6: ok, cumbersome but is the result of using layers.
+  F7: use different structs for different concerns. If refactor is small and cohesive, apply it.
+  F8: no problem, let's keep it this way.
+
+  Implement as stated above, then re-test everything (from unit to compose), fire a small test to get everything
+  compiling and working, and we'll take it from there.

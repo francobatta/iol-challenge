@@ -1,7 +1,9 @@
-package api
+package httpapi
 
 import (
 	"net/http"
+
+	"github.com/go-chi/chi/v5"
 
 	"github.com/francobatta/iol-challenge/notification-system/api/internal/audience"
 )
@@ -13,7 +15,7 @@ func (s *server) createApp(w http.ResponseWriter, r *http.Request) error {
 	if err := decode(w, r, &req); err != nil {
 		return err
 	}
-	app, err := s.svc.CreateApp(r.Context(), req.Name)
+	app, err := s.audiences.CreateApp(r.Context(), req.Name)
 	if err != nil {
 		return err
 	}
@@ -29,7 +31,7 @@ func (s *server) createApp(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (s *server) registerUser(w http.ResponseWriter, r *http.Request, appID string) error {
-	u, created, err := s.svc.RegisterUser(r.Context(), appID, r.PathValue("user_id"))
+	u, created, err := s.audiences.RegisterUser(r.Context(), appID, chi.URLParam(r, "user_id"))
 	if err != nil {
 		return err
 	}
@@ -42,7 +44,7 @@ func (s *server) registerUser(w http.ResponseWriter, r *http.Request, appID stri
 }
 
 func (s *server) user(w http.ResponseWriter, r *http.Request, appID string) error {
-	u, err := s.svc.User(r.Context(), appID, r.PathValue("user_id"))
+	u, err := s.audiences.User(r.Context(), appID, chi.URLParam(r, "user_id"))
 	if err != nil {
 		return err
 	}
@@ -53,11 +55,11 @@ func (s *server) user(w http.ResponseWriter, r *http.Request, appID string) erro
 func (s *server) users(w http.ResponseWriter, r *http.Request, appID string) error {
 	return servePage(w, r,
 		func(u audience.User) string { return u.ID },
-		func(p audience.Page) ([]audience.User, error) { return s.svc.Users(r.Context(), appID, p) })
+		func(p audience.Page) ([]audience.User, error) { return s.audiences.Users(r.Context(), appID, p) })
 }
 
 func (s *server) deleteUser(w http.ResponseWriter, r *http.Request, appID string) error {
-	if err := s.svc.DeleteUser(r.Context(), appID, r.PathValue("user_id")); err != nil {
+	if err := s.audiences.DeleteUser(r.Context(), appID, chi.URLParam(r, "user_id")); err != nil {
 		return err
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -73,8 +75,8 @@ func (s *server) createEndpoint(w http.ResponseWriter, r *http.Request, appID st
 	if err := decode(w, r, &req); err != nil {
 		return err
 	}
-	e, err := s.svc.CreateEndpoint(r.Context(), appID, audience.Endpoint{
-		UserID:   r.PathValue("user_id"),
+	e, err := s.audiences.CreateEndpoint(r.Context(), appID, audience.Endpoint{
+		UserID:   chi.URLParam(r, "user_id"),
 		Address:  req.Address,
 		Channel:  req.Channel,
 		Provider: req.Provider,
@@ -87,7 +89,7 @@ func (s *server) createEndpoint(w http.ResponseWriter, r *http.Request, appID st
 }
 
 func (s *server) endpoint(w http.ResponseWriter, r *http.Request, appID string) error {
-	e, err := s.svc.Endpoint(r.Context(), appID, r.PathValue("endpoint_id"))
+	e, err := s.audiences.Endpoint(r.Context(), appID, chi.URLParam(r, "endpoint_id"))
 	if err != nil {
 		return err
 	}
@@ -96,11 +98,11 @@ func (s *server) endpoint(w http.ResponseWriter, r *http.Request, appID string) 
 }
 
 func (s *server) endpoints(w http.ResponseWriter, r *http.Request, appID string) error {
-	userID := r.PathValue("user_id")
+	userID := chi.URLParam(r, "user_id")
 	return servePage(w, r,
 		func(e audience.Endpoint) string { return e.ID },
 		func(p audience.Page) ([]audience.Endpoint, error) {
-			return s.svc.Endpoints(r.Context(), appID, userID, p)
+			return s.audiences.Endpoints(r.Context(), appID, userID, p)
 		})
 }
 
@@ -109,7 +111,7 @@ func (s *server) updateEndpoint(w http.ResponseWriter, r *http.Request, appID st
 	if err := decode(w, r, &update); err != nil {
 		return err
 	}
-	e, err := s.svc.UpdateEndpoint(r.Context(), appID, r.PathValue("endpoint_id"), update)
+	e, err := s.audiences.UpdateEndpoint(r.Context(), appID, chi.URLParam(r, "endpoint_id"), update)
 	if err != nil {
 		return err
 	}
@@ -118,7 +120,7 @@ func (s *server) updateEndpoint(w http.ResponseWriter, r *http.Request, appID st
 }
 
 func (s *server) deleteEndpoint(w http.ResponseWriter, r *http.Request, appID string) error {
-	if err := s.svc.DeleteEndpoint(r.Context(), appID, r.PathValue("endpoint_id")); err != nil {
+	if err := s.audiences.DeleteEndpoint(r.Context(), appID, chi.URLParam(r, "endpoint_id")); err != nil {
 		return err
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -133,7 +135,7 @@ func (s *server) createList(w http.ResponseWriter, r *http.Request, appID string
 	if err := decode(w, r, &req); err != nil {
 		return err
 	}
-	l, err := s.svc.CreateList(r.Context(), appID, audience.List{Name: req.Name, Description: req.Description})
+	l, err := s.audiences.CreateList(r.Context(), appID, audience.List{Name: req.Name, Description: req.Description})
 	if err != nil {
 		return err
 	}
@@ -142,7 +144,7 @@ func (s *server) createList(w http.ResponseWriter, r *http.Request, appID string
 }
 
 func (s *server) list(w http.ResponseWriter, r *http.Request, appID string) error {
-	l, err := s.svc.List(r.Context(), appID, r.PathValue("list_id"))
+	l, err := s.audiences.List(r.Context(), appID, chi.URLParam(r, "list_id"))
 	if err != nil {
 		return err
 	}
@@ -153,7 +155,7 @@ func (s *server) list(w http.ResponseWriter, r *http.Request, appID string) erro
 func (s *server) lists(w http.ResponseWriter, r *http.Request, appID string) error {
 	return servePage(w, r,
 		func(l audience.List) string { return l.ID },
-		func(p audience.Page) ([]audience.List, error) { return s.svc.Lists(r.Context(), appID, p) })
+		func(p audience.Page) ([]audience.List, error) { return s.audiences.Lists(r.Context(), appID, p) })
 }
 
 func (s *server) updateList(w http.ResponseWriter, r *http.Request, appID string) error {
@@ -161,7 +163,7 @@ func (s *server) updateList(w http.ResponseWriter, r *http.Request, appID string
 	if err := decode(w, r, &update); err != nil {
 		return err
 	}
-	l, err := s.svc.UpdateList(r.Context(), appID, r.PathValue("list_id"), update)
+	l, err := s.audiences.UpdateList(r.Context(), appID, chi.URLParam(r, "list_id"), update)
 	if err != nil {
 		return err
 	}
@@ -170,7 +172,7 @@ func (s *server) updateList(w http.ResponseWriter, r *http.Request, appID string
 }
 
 func (s *server) deleteList(w http.ResponseWriter, r *http.Request, appID string) error {
-	if err := s.svc.DeleteList(r.Context(), appID, r.PathValue("list_id")); err != nil {
+	if err := s.audiences.DeleteList(r.Context(), appID, chi.URLParam(r, "list_id")); err != nil {
 		return err
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -178,8 +180,8 @@ func (s *server) deleteList(w http.ResponseWriter, r *http.Request, appID string
 }
 
 func (s *server) addMember(w http.ResponseWriter, r *http.Request, appID string) error {
-	userIDs := []string{r.PathValue("user_id")}
-	if err := s.svc.AddMembers(r.Context(), appID, r.PathValue("list_id"), userIDs); err != nil {
+	userIDs := []string{chi.URLParam(r, "user_id")}
+	if err := s.audiences.AddMembers(r.Context(), appID, chi.URLParam(r, "list_id"), userIDs); err != nil {
 		return err
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -193,7 +195,7 @@ func (s *server) addMembers(w http.ResponseWriter, r *http.Request, appID string
 	if err := decode(w, r, &req); err != nil {
 		return err
 	}
-	if err := s.svc.AddMembers(r.Context(), appID, r.PathValue("list_id"), req.UserIDs); err != nil {
+	if err := s.audiences.AddMembers(r.Context(), appID, chi.URLParam(r, "list_id"), req.UserIDs); err != nil {
 		return err
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -201,7 +203,7 @@ func (s *server) addMembers(w http.ResponseWriter, r *http.Request, appID string
 }
 
 func (s *server) removeMember(w http.ResponseWriter, r *http.Request, appID string) error {
-	err := s.svc.RemoveMember(r.Context(), appID, r.PathValue("list_id"), r.PathValue("user_id"))
+	err := s.audiences.RemoveMember(r.Context(), appID, chi.URLParam(r, "list_id"), chi.URLParam(r, "user_id"))
 	if err != nil {
 		return err
 	}
@@ -210,10 +212,10 @@ func (s *server) removeMember(w http.ResponseWriter, r *http.Request, appID stri
 }
 
 func (s *server) members(w http.ResponseWriter, r *http.Request, appID string) error {
-	listID := r.PathValue("list_id")
+	listID := chi.URLParam(r, "list_id")
 	return servePage(w, r,
 		func(m audience.Member) string { return m.UserID },
 		func(p audience.Page) ([]audience.Member, error) {
-			return s.svc.Members(r.Context(), appID, listID, p)
+			return s.audiences.Members(r.Context(), appID, listID, p)
 		})
 }

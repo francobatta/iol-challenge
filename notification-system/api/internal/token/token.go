@@ -12,7 +12,6 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// A Signer issues and verifies tokens with one secret.
 type Signer struct {
 	secret []byte
 }
@@ -25,7 +24,6 @@ func NewSigner(secret string) (*Signer, error) {
 	return &Signer{secret: []byte(secret)}, nil
 }
 
-// Issue returns a token for the app.
 func (s *Signer) Issue(appID string) (string, error) {
 	claims := jwt.RegisteredClaims{Subject: appID}
 	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(s.secret)

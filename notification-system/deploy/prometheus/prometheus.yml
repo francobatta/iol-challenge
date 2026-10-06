@@ -1,0 +1,39 @@
+# What the Prometheus of compose.yaml scrapes. Between them the three jobs say, for each
+# app on each provider, what was queued (api), what is waiting (rabbitmq) and what became
+# of it (worker). Every series about an app on a provider carries the labels provider and
+# app_id; the README lists the metrics.
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: api
+    static_configs:
+      - targets: ["api:9090"]
+
+  # Looked up by DNS rather than listed, so that workers added with
+  # "docker compose up --scale" are scraped too.
+  - job_name: worker
+    dns_sd_configs:
+      - names: [worker-twilio, worker-mailchimp, worker-apns, worker-fcm]
+        type: A
+        port: 9090
+
+  # The rabbitmq_prometheus plugin. Its default endpoint aggregates over queues; this one
+  # returns the chosen metrics per queue, here the message counts.
+  - job_name: rabbitmq
+    metrics_path: /metrics/detailed
+    params:
+      family: [queue_coarse_metrics]
+    static_configs:
+      - targets: ["rabbitmq:15692"]
+    # A send queue is named notify.send.<provider>.<app_id>. Spelling that out as labels
+    # lets its metrics be joined with those of the api and the workers.
+    metric_relabel_configs:
+      - source_labels: [queue]
+        regex: notify\.send\.([^.]+)\.(.+)
+        target_label: provider
+        replacement: $1
+      - source_labels: [queue]
+        regex: notify\.send\.([^.]+)\.(.+)
+        target_label: app_id
+        replacement: $2

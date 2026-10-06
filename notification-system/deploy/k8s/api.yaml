@@ -1,0 +1,50 @@
+# The REST API, which also dispatches the notifications it accepts. It runs from the image
+# built by ../../api/Dockerfile and is configured by the api-config ConfigMap, made from
+# ../../api/.env.
+#
+# Any number of replicas may run: they share fan-out through the fanouts table and result
+# counting through its queue. Two is for availability, not load.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: notifications
+  labels: {app: api}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: api}
+  template:
+    metadata:
+      labels: {app: api}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      containers:
+        - name: api
+          image: notification-system/api:latest # replace with the pushed image
+          ports:
+            - {name: http, containerPort: 8080}
+            - {name: metrics, containerPort: 9090}
+          envFrom:
+            - configMapRef: {name: api-config}
+          readinessProbe:
+            tcpSocket: {port: http}
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket: {port: http}
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 250m, memory: 128Mi}
+            limits: {memory: 256Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: notifications
+spec:
+  selector: {app: api}
+  ports:
+    - {name: http, port: 80, targetPort: http}

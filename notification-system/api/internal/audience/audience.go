@@ -39,7 +39,6 @@ type User struct {
 // A Channel is a kind of notification delivery.
 type Channel string
 
-// The channels an endpoint can use.
 const (
 	ChannelEmail Channel = "email"
 	ChannelSMS   Channel = "sms"
@@ -52,7 +51,7 @@ type Endpoint struct {
 	UserID   string  `json:"user_id"`
 	Address  string  `json:"address"`
 	Channel  Channel `json:"channel"`
-	Provider string  `json:"provider"` // delivers on the channel, for example "ses" or "fcm"
+	Provider string  `json:"provider"` // delivers on the channel: twilio, mailchimp, apns or fcm
 }
 
 // An EndpointUpdate changes the non-nil fields of an endpoint.
@@ -88,14 +87,14 @@ type Page struct {
 	Limit int    // maximum number of items
 }
 
-// Store persists the audience. Implementations must be safe for concurrent use.
+// Repository persists the audience. Implementations must be safe for concurrent use.
 //
 // Methods that look up or change a single user, endpoint or list return an error
 // wrapping [ErrNotFound] when it does not exist in the app. Inputs have already been
 // validated by [Service].
 //
-//go:generate go tool mockgen -destination=audiencetest/mock_store.go -package=audiencetest . Store
-type Store interface {
+//go:generate go tool mockgen -destination=audiencetest/mock_repository.go -package=audiencetest . Repository
+type Repository interface {
 	CreateApp(ctx context.Context, name string) (App, error)
 
 	// PutUser creates the user if it does not exist and reports whether it did so.

@@ -13,12 +13,12 @@ import (
 
 const appID = "app-1"
 
-// newService returns a Service over a mock store, and the recorder on which a test
-// states the store calls it expects. Any other store call fails the test.
-func newService(t *testing.T) (*audience.Service, *audiencetest.MockStoreMockRecorder) {
+// newService returns a Service over a mock repository, and the recorder on which a test
+// states the repository calls it expects. Any other repository call fails the test.
+func newService(t *testing.T) (*audience.Service, *audiencetest.MockRepositoryMockRecorder) {
 	t.Helper()
-	store := audiencetest.NewMockStore(gomock.NewController(t))
-	return audience.NewService(store), store.EXPECT()
+	repo := audiencetest.NewMockRepository(gomock.NewController(t))
+	return audience.NewService(repo), repo.EXPECT()
 }
 
 func TestRegisterUserValidatesID(t *testing.T) {
@@ -34,9 +34,9 @@ func TestRegisterUserValidatesID(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			svc, store := newService(t)
+			svc, repo := newService(t)
 			if test.wantErr == nil {
-				store.PutUser(gomock.Any(), appID, test.userID).Return(audience.User{ID: test.userID}, true, nil)
+				repo.PutUser(gomock.Any(), appID, test.userID).Return(audience.User{ID: test.userID}, true, nil)
 			}
 			_, _, err := svc.RegisterUser(t.Context(), appID, test.userID)
 			if !errors.Is(err, test.wantErr) {
@@ -57,11 +57,11 @@ func TestAddMembersRejectsBadBatchSizes(t *testing.T) {
 }
 
 func TestAddMembers(t *testing.T) {
-	svc, store := newService(t)
+	svc, repo := newService(t)
 	userIDs := []string{"ana", "bob", "ana"}
-	store.List(gomock.Any(), appID, "list-1").Return(audience.List{ID: "list-1"}, nil)
-	store.KnownUsers(gomock.Any(), appID, userIDs).Return([]string{"bob", "ana"}, nil)
-	store.AddMembers(gomock.Any(), appID, "list-1", userIDs).Return(nil)
+	repo.List(gomock.Any(), appID, "list-1").Return(audience.List{ID: "list-1"}, nil)
+	repo.KnownUsers(gomock.Any(), appID, userIDs).Return([]string{"bob", "ana"}, nil)
+	repo.AddMembers(gomock.Any(), appID, "list-1", userIDs).Return(nil)
 
 	if err := svc.AddMembers(t.Context(), appID, "list-1", userIDs); err != nil {
 		t.Errorf("AddMembers(%q) = %v, want nil", userIDs, err)
@@ -69,8 +69,8 @@ func TestAddMembers(t *testing.T) {
 }
 
 func TestAddMembersToUnknownList(t *testing.T) {
-	svc, store := newService(t)
-	store.List(gomock.Any(), appID, "missing").Return(audience.List{}, audience.ErrNotFound)
+	svc, repo := newService(t)
+	repo.List(gomock.Any(), appID, "missing").Return(audience.List{}, audience.ErrNotFound)
 
 	err := svc.AddMembers(t.Context(), appID, "missing", []string{"ana"})
 	if !errors.Is(err, audience.ErrNotFound) {
@@ -79,10 +79,10 @@ func TestAddMembersToUnknownList(t *testing.T) {
 }
 
 func TestAddMembersNamesUnknownUsers(t *testing.T) {
-	svc, store := newService(t)
+	svc, repo := newService(t)
 	userIDs := []string{"bob", "ana", "cleo", "bob"}
-	store.List(gomock.Any(), appID, "list-1").Return(audience.List{ID: "list-1"}, nil)
-	store.KnownUsers(gomock.Any(), appID, userIDs).Return([]string{"ana"}, nil)
+	repo.List(gomock.Any(), appID, "list-1").Return(audience.List{ID: "list-1"}, nil)
+	repo.KnownUsers(gomock.Any(), appID, userIDs).Return([]string{"ana"}, nil)
 	// No AddMembers call is expected: one unknown user rejects the whole batch.
 
 	err := svc.AddMembers(t.Context(), appID, "list-1", userIDs)

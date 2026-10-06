@@ -1,21 +1,15 @@
-// Package api serves the audience REST API over HTTP.
-//
-// Every route but app creation is called by an app, which identifies itself with a
-// bearer token. The app's ID always comes from that token, never from the URL or body.
-package api
+package httpapi
 
 import (
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
-	"strings"
 
 	"github.com/francobatta/iol-challenge/notification-system/api/internal/audience"
-	"github.com/francobatta/iol-challenge/notification-system/api/internal/token"
+	"github.com/francobatta/iol-challenge/notification-system/api/internal/notify"
 )
 
 const (
@@ -26,76 +20,6 @@ const (
 
 var errUnauthorized = errors.New("unauthorized")
 
-type server struct {
-	svc      *audience.Service
-	tokens   *token.Signer
-	adminKey string
-}
-
-// NewHandler returns the handler for the whole API. Requests to create an app must
-// carry adminKey in the X-Admin-Key header; all other requests must carry a token
-// issued by tokens.
-func NewHandler(svc *audience.Service, tokens *token.Signer, adminKey string) http.Handler {
-	s := &server{svc: svc, tokens: tokens, adminKey: adminKey}
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("POST /v1/apps", s.asAdmin(s.createApp))
-
-	mux.HandleFunc("PUT /v1/users/{user_id}", s.asApp(s.registerUser))
-	mux.HandleFunc("GET /v1/users/{user_id}", s.asApp(s.user))
-	mux.HandleFunc("GET /v1/users", s.asApp(s.users))
-	mux.HandleFunc("DELETE /v1/users/{user_id}", s.asApp(s.deleteUser))
-
-	mux.HandleFunc("POST /v1/users/{user_id}/endpoints", s.asApp(s.createEndpoint))
-	mux.HandleFunc("GET /v1/users/{user_id}/endpoints", s.asApp(s.endpoints))
-	mux.HandleFunc("GET /v1/endpoints/{endpoint_id}", s.asApp(s.endpoint))
-	mux.HandleFunc("PATCH /v1/endpoints/{endpoint_id}", s.asApp(s.updateEndpoint))
-	mux.HandleFunc("DELETE /v1/endpoints/{endpoint_id}", s.asApp(s.deleteEndpoint))
-
-	mux.HandleFunc("POST /v1/lists", s.asApp(s.createList))
-	mux.HandleFunc("GET /v1/lists", s.asApp(s.lists))
-	mux.HandleFunc("GET /v1/lists/{list_id}", s.asApp(s.list))
-	mux.HandleFunc("PATCH /v1/lists/{list_id}", s.asApp(s.updateList))
-	mux.HandleFunc("DELETE /v1/lists/{list_id}", s.asApp(s.deleteList))
-
-	mux.HandleFunc("PUT /v1/lists/{list_id}/members/{user_id}", s.asApp(s.addMember))
-	mux.HandleFunc("DELETE /v1/lists/{list_id}/members/{user_id}", s.asApp(s.removeMember))
-	mux.HandleFunc("GET /v1/lists/{list_id}/members", s.asApp(s.members))
-	mux.HandleFunc("POST /v1/lists/{list_id}/members", s.asApp(s.addMembers))
-
-	return mux
-}
-
-// asAdmin runs h only for requests that carry the admin key.
-func (s *server) asAdmin(h func(w http.ResponseWriter, r *http.Request) error) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		key := r.Header.Get("X-Admin-Key")
-		if subtle.ConstantTimeCompare([]byte(key), []byte(s.adminKey)) != 1 {
-			writeError(w, r, errUnauthorized)
-			return
-		}
-		if err := h(w, r); err != nil {
-			writeError(w, r, err)
-		}
-	}
-}
-
-// asApp runs h with the ID of the app that the request's bearer token was issued to.
-func (s *server) asApp(h func(w http.ResponseWriter, r *http.Request, appID string) error) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		tok, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		appID, err := s.tokens.Verify(tok)
-		if err != nil {
-			writeError(w, r, errUnauthorized)
-			return
-		}
-		if err := h(w, r, appID); err != nil {
-			writeError(w, r, err)
-		}
-	}
-}
-
-// decode reads the JSON request body into dst.
 func decode(w http.ResponseWriter, r *http.Request, dst any) error {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes))
 	dec.DisallowUnknownFields()
@@ -135,6 +59,8 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 		status, code, message = http.StatusNotFound, "not_found", err.Error()
 	case errors.Is(err, audience.ErrConflict):
 		status, code, message = http.StatusConflict, "conflict", err.Error()
+	case errors.Is(err, notify.ErrQuotaExceeded):
+		status, code, message = http.StatusTooManyRequests, "quota_exceeded", err.Error()
 	default:
 		slog.ErrorContext(r.Context(), "Request failed", "method", r.Method, "path", r.URL.Path, "err", err)
 	}
