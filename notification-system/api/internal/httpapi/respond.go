@@ -17,6 +17,8 @@ const (
 	defaultPageSize = 50
 	maxPageSize     = 200
 	maxBodyBytes    = 1 << 20
+	// maxImportBytes bounds the one body that is streamed instead of decoded whole.
+	maxImportBytes = 64 << 20
 )
 
 var errUnauthorized = errors.New("unauthorized")

@@ -5,7 +5,9 @@
 // mirror the JSON the API writes.
 
 export type User = { user_id: string; created_at: string }
-export type Channel = "sms" | "email" | "push"
+/** What an import stored: the rows it read, and the users and endpoints among them that were new. */
+export type ImportResult = { rows: number; users: number; endpoints: number }
+export type Channel ="sms" | "email" | "push"
 export type Endpoint = { endpoint_id: string; user_id: string; address: string; channel: Channel; provider: string }
 export type List = { list_id: string; name: string; description: string; created_at: string }
 export type Member = { user_id: string; added_at: string }
@@ -82,10 +84,12 @@ export function setSession(next: { token: string; onUnauthorized: () => void } |
 type Options = { body?: unknown; headers?: Record<string, string> }
 
 async function send<T>(method: string, path: string, { body, headers }: Options = {}): Promise<T> {
+  // A file is sent as it is; anything else is sent as JSON.
+  const file = body instanceof Blob
   const response = await fetch(path, {
     method,
-    headers: { ...(body === undefined ? {} : { "Content-Type": "application/json" }), ...headers },
-    body: body === undefined ? undefined : JSON.stringify(body),
+    headers: { ...(body === undefined || file ? {} : { "Content-Type": "application/json" }), ...headers },
+    body: body === undefined ? undefined : file ? body : JSON.stringify(body),
   })
   if (response.status === 204) {
     return undefined as T
@@ -153,6 +157,9 @@ export const api = {
   users: (after?: string) => call<Page<User>>("GET", `/v1/users${query({ after, limit: pageSize })}`),
   registerUser: (userID: string) => call<User>("PUT", `/v1/users/${id(userID)}`),
   deleteUser: (userID: string) => call<void>("DELETE", `/v1/users/${id(userID)}`),
+  /** file is a CSV of `user_id,channel,provider,address` rows. listID is a list to add every user in it to. */
+  importUsers: (file: Blob, listID?: string) =>
+    call<ImportResult>("POST", `/v1/users/import${query({ list_id: listID })}`, { body: file, headers: { "Content-Type": "text/csv" } }),
 
   endpoints: (userID: string, after?: string) =>
     call<Page<Endpoint>>("GET", `/v1/users/${id(userID)}/endpoints${query({ after, limit: pageSize })}`),

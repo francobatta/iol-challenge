@@ -1,0 +1,43 @@
+# The console: nginx serving the built React app and passing /v1 on to the API.
+# Image: web/Dockerfile, whose nginx.conf.template reads the two variables below.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  labels: {app: web}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: web}
+  template:
+    metadata:
+      labels: {app: web}
+    spec:
+      containers:
+        - name: web
+          image: notification-system/web
+          ports:
+            - {name: http, containerPort: 80}
+          env:
+            # nginx looks names up itself and knows nothing of the pod's search domains,
+            # so both names are written in full.
+            - {name: DNS_RESOLVER, value: kube-dns.kube-system.svc.cluster.local}
+            - {name: API_URL, value: "http://api.notifications.svc.cluster.local:8080"}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits: {memory: 128Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+spec:
+  selector: {app: web}
+  ports:
+    - {name: http, port: 80, targetPort: http}

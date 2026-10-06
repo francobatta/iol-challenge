@@ -81,6 +81,13 @@ type Member struct {
 	AddedAt time.Time `json:"added_at"`
 }
 
+// An ImportResult counts what an import did.
+type ImportResult struct {
+	Rows      int `json:"rows"`      // endpoints read and stored, new or not
+	Users     int `json:"users"`     // users created
+	Endpoints int `json:"endpoints"` // endpoints created
+}
+
 // A Page selects part of a collection, which is always ordered by ID.
 type Page struct {
 	After string // return items whose ID sorts after this one; empty starts at the beginning
@@ -115,6 +122,13 @@ type Repository interface {
 	// It returns ErrConflict under the same rule as CreateEndpoint.
 	UpdateEndpoint(ctx context.Context, appID string, e Endpoint) (Endpoint, error)
 	DeleteEndpoint(ctx context.Context, appID, endpointID string) error
+
+	// ImportEndpoints registers the users the endpoints belong to, creates the endpoints
+	// and, unless listID is empty, adds the users to that list. It does all of it or
+	// nothing. Users, endpoints and memberships that exist are left as they are, and
+	// the counts returned are of those it created. The IDs of the endpoints are ignored
+	// and new ones are assigned. It returns ErrNotFound if the list does not exist.
+	ImportEndpoints(ctx context.Context, appID, listID string, endpoints []Endpoint) (users, created int, err error)
 
 	// CreateList stores l under a new ID. It returns ErrConflict if the name is taken.
 	CreateList(ctx context.Context, appID string, l List) (List, error)

@@ -46,16 +46,13 @@ func SetupTracing(ctx context.Context, service, endpoint string) (shutdown func(
 	return provider.Shutdown, nil
 }
 
-// NewRegistry returns a metrics registry that already reports on the Go runtime and
-// the process.
 func NewRegistry() *prometheus.Registry {
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	return reg
 }
 
-// MetricsRouter returns a handler that serves the metrics of reg at /metrics.
-func MetricsRouter(reg *prometheus.Registry) http.Handler {
+func MetricsRouter(reg *prometheus.Registry) chi.Router {
 	r := chi.NewRouter()
 	r.Method(http.MethodGet, "/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 	return r

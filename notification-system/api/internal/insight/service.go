@@ -63,7 +63,7 @@ func (s *Service) Snapshot(ctx context.Context, appID string, window time.Durati
 		w   = promDuration(window)
 		rw  = promDuration(max(step, minRateWindow))
 	)
-	const retryQueues = `queue=~"notify\\.(retry\\..+|dead)"`
+	const deadQueue = `queue="notify.dead"`
 
 	// Every query runs at once; each writes to a variable of its own.
 	g, ctx := errgroup.WithContext(ctx)
@@ -104,7 +104,7 @@ func (s *Service) Snapshot(ctx context.Context, appID string, window time.Durati
 	instant(&workers, "count by (provider) (notify_queues_subscribed)")
 	instant(&inFlight, "sum by (provider) (notify_sends_in_flight)")
 	instant(&subscribed, "max by (provider) (notify_queues_subscribed)")
-	instant(&snap.System.Queues, "sum by (queue) (rabbitmq_detailed_queue_messages{"+retryQueues+"})")
+	instant(&snap.System.Queues, "sum by (queue) (rabbitmq_detailed_queue_messages{"+deadQueue+"})")
 	latency := func(quantile string) string {
 		return "histogram_quantile(" + quantile + ", sum by (provider, le) (rate(notify_provider_request_seconds_bucket[" + rw + "])))"
 	}

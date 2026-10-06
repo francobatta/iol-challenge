@@ -18,18 +18,19 @@ import (
 	"github.com/francobatta/iol-challenge/notification-system/api/internal/postgres"
 	"github.com/francobatta/iol-challenge/notification-system/api/internal/prom"
 	"github.com/francobatta/iol-challenge/notification-system/api/internal/token"
+	"github.com/francobatta/iol-challenge/notification-system/commons/health"
 	"github.com/francobatta/iol-challenge/notification-system/commons/telemetry"
 )
 
 // dependencies is everything the server is made of: the API it serves, the background
-// work it runs next to it, and the handler that reports on that work.
+// work it runs next to it, and the handler that reports on that work and answers the probes.
 type dependencies struct {
 	db          *pgxpool.Pool
 	mq          *broker.Client
 	flushTraces func(context.Context) error
 
-	router        http.Handler
-	metricsRouter http.Handler
+	router    http.Handler
+	opsRouter http.Handler // metrics and probes
 
 	fanout *dispatch.Fanout
 }
@@ -70,7 +71,11 @@ func newDependencies(ctx context.Context, cfg config) (_ *dependencies, err erro
 	// Metrics.
 	registry := telemetry.NewRegistry()
 	metrics := dispatch.NewMetrics(registry)
-	d.metricsRouter = telemetry.MetricsRouter(registry)
+	ops := telemetry.MetricsRouter(registry)
+	// Ready means able to accept requests, which takes the database and nothing else:
+	// notifications are accepted while RabbitMQ is down.
+	health.Mount(ops, d.db.Ping)
+	d.opsRouter = ops
 
 	// Repository.
 	repo := postgres.NewRepository(d.db)
@@ -85,7 +90,7 @@ func newDependencies(ctx context.Context, cfg config) (_ *dependencies, err erro
 	}
 
 	// Transport.
-	d.router = httpapi.NewRouter(audiences, notifications, insights, tokens, cfg.AdminKey)
+	d.router = httpapi.NewRouter(audiences, notifications, insights, tokens, cfg.AdminKey, httpapi.NewMetrics(registry))
 	return d, nil
 }
 

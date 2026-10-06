@@ -3,10 +3,12 @@ package audience
 import (
 	"context"
 	"fmt"
-	"github.com/francobatta/iol-challenge/notification-system/commons/providers"
+	"iter"
 	"slices"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/francobatta/iol-challenge/notification-system/commons/providers"
 )
 
 const (
@@ -14,6 +16,8 @@ const (
 	MaxUserIDLen = 255
 	// MaxMembersPerAdd is the most users a single AddMembers call accepts.
 	MaxMembersPerAdd = 1000
+	// ImportBatchSize is how many endpoints Import stores at a time.
+	ImportBatchSize = 1000
 )
 
 // A Service applies the audience rules on top of a Repository.
@@ -34,10 +38,71 @@ func (s *Service) CreateApp(ctx context.Context, name string) (App, error) {
 
 // RegisterUser makes sure the user exists and reports whether this call created it.
 func (s *Service) RegisterUser(ctx context.Context, appID, userID string) (u User, created bool, err error) {
-	if n := utf8.RuneCountInString(userID); n == 0 || n > MaxUserIDLen {
-		return User{}, false, fmt.Errorf("%w: user_id must be 1 to %d characters", ErrInvalid, MaxUserIDLen)
+	if err := validateUserID(userID); err != nil {
+		return User{}, false, err
 	}
 	return s.repo.PutUser(ctx, appID, userID)
+}
+
+func validateUserID(userID string) error {
+	if n := utf8.RuneCountInString(userID); n == 0 || n > MaxUserIDLen {
+		return fmt.Errorf("%w: user_id must be 1 to %d characters", ErrInvalid, MaxUserIDLen)
+	}
+	return nil
+}
+
+// Import stores endpoints in bulk: it registers the user of each one, gives the user
+// the endpoint and, unless listID is empty, adds the user to that list. Users,
+// endpoints and memberships that already exist are left as they are, so importing the
+// same rows again changes nothing.
+//
+// rows yields the endpoints, or the error that kept one from being read, which ends
+// the import. Errors number the rows from 1. The IDs of the endpoints are ignored and
+// new ones are assigned.
+//
+// Rows are stored ImportBatchSize at a time, so Import is not all-or-nothing: when it
+// fails, the batches before the failing one stay, and the result counts them.
+func (s *Service) Import(ctx context.Context, appID, listID string, rows iter.Seq2[Endpoint, error]) (ImportResult, error) {
+	if listID != "" {
+		if _, err := s.repo.List(ctx, appID, listID); err != nil {
+			return ImportResult{}, err
+		}
+	}
+	var res ImportResult
+	batch := make([]Endpoint, 0, ImportBatchSize)
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		users, endpoints, err := s.repo.ImportEndpoints(ctx, appID, listID, batch)
+		if err != nil {
+			return err
+		}
+		res.Rows += len(batch)
+		res.Users += users
+		res.Endpoints += endpoints
+		batch = batch[:0]
+		return nil
+	}
+	for e, err := range rows {
+		row := res.Rows + len(batch) + 1
+		if err != nil {
+			return res, fmt.Errorf("%w: row %d: %v", ErrInvalid, row, err)
+		}
+		if err := validateUserID(e.UserID); err != nil {
+			return res, fmt.Errorf("row %d: %w", row, err)
+		}
+		if err := validateEndpoint(e); err != nil {
+			return res, fmt.Errorf("row %d: %w", row, err)
+		}
+		batch = append(batch, e)
+		if len(batch) == ImportBatchSize {
+			if err := flush(); err != nil {
+				return res, err
+			}
+		}
+	}
+	return res, flush()
 }
 
 func (s *Service) User(ctx context.Context, appID, userID string) (User, error) {

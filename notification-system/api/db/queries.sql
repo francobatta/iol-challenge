@@ -193,3 +193,32 @@ WITH finished AS (
 INSERT INTO usage_daily (app_id, day, queued)
 SELECT f.app_id, current_date, @published FROM finished f
 ON CONFLICT (app_id, day) DO UPDATE SET queued = usage_daily.queued + EXCLUDED.queued;
+
+-- name: ImportEndpoints :one
+-- Registers the users of a batch of endpoints, gives them the endpoints and, if there is a
+-- list, makes them members of it. Row i of the batch is element i of each array. What
+-- already exists is left as it is, and the counts are of what was created.
+--
+-- One statement, so a batch is stored whole or not at all, and the foreign keys from
+-- endpoints and members to users are checked when it ends, after the users are in.
+WITH batch AS (
+    -- The four arrays are the same length, so their rows come out side by side.
+    SELECT unnest(@user_ids::text[]) AS user_id, unnest(@channels::text[]) AS channel,
+           unnest(@providers::text[]) AS provider, unnest(@addresses::text[]) AS address
+), new_users AS (
+    INSERT INTO users (app_id, user_id)
+    SELECT DISTINCT @app_id::uuid, b.user_id FROM batch b
+    ON CONFLICT DO NOTHING
+    RETURNING 1
+), new_endpoints AS (
+    INSERT INTO endpoints (app_id, user_id, address, channel, provider)
+    SELECT @app_id::uuid, b.user_id, b.address, b.channel, b.provider FROM batch b
+    ON CONFLICT DO NOTHING
+    RETURNING 1
+), new_members AS (
+    INSERT INTO list_members (app_id, list_id, user_id)
+    SELECT DISTINCT @app_id::uuid, sqlc.narg(list_id)::uuid, b.user_id FROM batch b
+    WHERE sqlc.narg(list_id)::uuid IS NOT NULL
+    ON CONFLICT DO NOTHING
+)
+SELECT (SELECT count(*) FROM new_users) AS users, (SELECT count(*) FROM new_endpoints) AS endpoints;

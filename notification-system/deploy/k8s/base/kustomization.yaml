@@ -1,0 +1,52 @@
+# The notification system itself: the API, the console and one worker pool per provider.
+#
+# It is not deployable alone. It expects, in the same namespace:
+#
+#   - the Secrets api-secrets and worker-secrets (see the comments in api.yaml and
+#     workers/pool/deployment.yaml for their keys);
+#   - Postgres, RabbitMQ, Prometheus, an OTLP collector such as Tempo and the providers,
+#     wherever api-config and worker-config below say they are;
+#   - KEDA installed in the cluster.
+#
+# An overlay supplies those. ../overlays/k3s does it for a single-node cluster, with
+# ../infra standing in for the managed services of a real deployment.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: notifications
+
+resources:
+  - namespace.yaml
+  - api.yaml
+  - web.yaml
+  - workers/twilio
+  - workers/mailchimp
+  - workers/apns
+  - workers/fcm
+
+# Generated ConfigMaps get a hash of their content in their name, so changing a value
+# rolls the pods that read it. Everything here is safe to publish; credentials are in the
+# Secrets.
+configMapGenerator:
+  - name: api-config
+    literals:
+      - ADDR=:8080
+      # Metrics and the probes.
+      - METRICS_ADDR=:9090
+      # GET /v1/metrics reads from here.
+      - PROMETHEUS_URL=http://prometheus:9090
+      # Traces are exported here, over OTLP/HTTP.
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4318
+  - name: worker-config
+    literals:
+      # A worker runs min(CONCURRENCY, PREFETCH x apps with a backlog) sends at once.
+      # The KEDA targets in workers/pool/scaledobject.yaml assume these two values.
+      - CONCURRENCY=200
+      - PREFETCH=50
+      # Metrics and the probes.
+      - METRICS_ADDR=:9090
+      # Traces are exported here, over OTLP/HTTP.
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4318
+      # Every pool points at the mock. A real deployment patches each pool's own
+      # provider URL in.
+      - PROVIDER_URL=http://mockprovider:8081

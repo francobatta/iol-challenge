@@ -1,0 +1,11 @@
+# Loads every dashboard in /var/lib/grafana/dashboards, where compose and the cluster
+# put the files of ../../dashboards. They are changed there, not in the browser.
+apiVersion: 1
+
+providers:
+  - name: notification-system
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards

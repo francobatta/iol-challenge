@@ -7,8 +7,9 @@
 //  3. Teach the worker to call it, in the worker module's provider package. A test
 //     there fails until every name here has a client.
 //  4. Give it a route in the mock, worker/cmd/mockprovider.
-//  5. Run a worker pool for it: a service in compose.yaml, and a Deployment and a
-//     ScaledObject in deploy/k8s.
+//  5. Run a worker pool for it: a service in compose.yaml, and a directory next to
+//     the other pools in deploy/k8s/base/workers, listed in the kustomization above
+//     them.
 package providers
 
 const (

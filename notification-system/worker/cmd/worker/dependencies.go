@@ -10,6 +10,7 @@ import (
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
+	"github.com/francobatta/iol-challenge/notification-system/commons/health"
 	"github.com/francobatta/iol-challenge/notification-system/commons/telemetry"
 	"github.com/francobatta/iol-challenge/notification-system/worker/internal/breaker"
 	"github.com/francobatta/iol-challenge/notification-system/worker/internal/consume"
@@ -24,14 +25,14 @@ const (
 )
 
 // dependencies is everything the worker is made of: the pool that consumes and sends,
-// and the handler that serves its metrics.
+// and the handler that serves its metrics and probes.
 type dependencies struct {
 	mq          *amqp.Connection
 	flushTraces func(context.Context) error
 
 	pool *consume.Pool
 
-	metricsRouter http.Handler
+	opsRouter http.Handler // metrics and probes
 }
 
 // newDependencies builds the worker from the bottom up: the provider and RabbitMQ
@@ -59,10 +60,6 @@ func newDependencies(ctx context.Context, cfg config) (_ *dependencies, err erro
 	if err != nil {
 		return nil, fmt.Errorf("AMQP_URL: connecting to RabbitMQ: %v", err)
 	}
-	publisher, err := consume.NewAMQPPublisher(d.mq)
-	if err != nil {
-		return nil, err
-	}
 	d.flushTraces, err = telemetry.SetupTracing(ctx, "notification-worker-"+cfg.Provider, cfg.OTLPEndpoint)
 	if err != nil {
 		return nil, err
@@ -71,7 +68,9 @@ func newDependencies(ctx context.Context, cfg config) (_ *dependencies, err erro
 	// Metrics.
 	registry := telemetry.NewRegistry()
 	metrics := consume.NewMetrics(registry, cfg.Provider)
-	d.metricsRouter = telemetry.MetricsRouter(registry)
+	ops := telemetry.MetricsRouter(registry)
+	health.Mount(ops, d.ready)
+	d.opsRouter = ops
 
 	// Services.
 	breakers := breaker.NewSet(breaker.Settings{
@@ -82,9 +81,18 @@ func newDependencies(ctx context.Context, cfg config) (_ *dependencies, err erro
 		IsFailure: func(err error) bool { return errors.Is(err, provider.ErrRetryable) },
 		OnChange:  metrics.BreakerChanged,
 	})
-	handler := consume.NewHandler(sender, publisher, breakers, metrics, cfg.Concurrency)
+	handler := consume.NewHandler(sender, breakers, metrics, cfg.Concurrency)
 	d.pool = consume.NewPool(d.mq, discoverer.Queues, handler, metrics, cfg.Prefetch, consume.DefaultDiscoveryInterval)
 	return d, nil
+}
+
+// ready reports why the worker cannot take deliveries, which is only ever that it lost
+// RabbitMQ. It exits when that happens, so this covers the moment in between.
+func (d *dependencies) ready(context.Context) error {
+	if d.mq.IsClosed() {
+		return errors.New("the RabbitMQ connection is closed")
+	}
+	return nil
 }
 
 func (d *dependencies) close() {

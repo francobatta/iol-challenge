@@ -54,3 +54,56 @@ Add a minimal section with docs using https://github.com/redocly/redoc - openapi
   Be BRIEF and simple
 
    Auth does not matter for this section as it is more teaching-oriented
+***
+Provide a summary of all test cases (whether unit, integration, e2e, smoke, etc.) for the system and its
+  components
+***
+/clear
+***
+Let's separate and improve the deploy and k8s part of this codebase. First, keep the compose in-place so local
+  devs can quickly spin up a complete, working instance of the system. Make sure said compose is working correctly
+  and spins up without hassle (docker compose up must work without touching anything else).
+
+  Then, let's revamp the deploy logic: configmaps, needed deployments, KEDA, and a minimal working k8s cluster
+  (using k3s and not much else - no extra nodes needed, no fancy features) to prove that the app works and scales in
+  production.
+
+  Provide a simple script to create the cluster and apply all needed k8s objects.
+
+  The telltale sign that this works is to create the minimal cluster, then have a load test executable using a
+  script, and have said test verify the worker scaling using KEDA. Then the script must assess that the job has
+  completed (probing pg, rabbit mq status, metrics endpoint, the API and k8s status)
+***
+Looks right, I would only add that the components need k8s standard probes (readyz, healthz). Please implement and
+  test everything is correct
+***
+Give me a command to plug k9s to the actual cluster in docker
+***
+ At web, add an import part to bulk import users using the existing endpoints. Provide a sample of 5000 users as
+  placeholder for testing from web. KISS
+***
+ [⧉ In handler.go] The current strategy for retries is ad-hoc and badly designed (republishes every
+  time a message is retryable). We should not manually re-publish messages. Just nack and use Quorum
+  Queues Delayed Retry (read the docs at https://www.rabbitmq.com/docs/quorum-queues#delayed-retry
+  and https://www.rabbitmq.com/docs/quorum-queues#recommended-approach-delayed-retry)
+
+  Aim for simplicity and compliance without reinventing the wheel (prefer established
+  implementations)
+***
+How can we monitor the services right now? Integrate basic APM into the existing prom
+  infrastructure and provide a frontend to see it (use grafana or other opinionated, established
+  tools). Remove any unused observability infra as well
+***
+/clear
+***
+ Let's completely re-do README.md.
+
+  It must state:
+  * How to run the app locally (compose)
+  * How to simulate prod (k8s, k3s)
+
+  in very simple, reproducible commands, no prerequisites other than stated.
+
+It must also link to a DESIGN.md file I will write later (create empty).
+
+Bring all the stuff you may need in a very summarized form to a CLAUDE.md file.

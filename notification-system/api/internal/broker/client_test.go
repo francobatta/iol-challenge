@@ -100,9 +100,9 @@ func TestPublishDeliveries(t *testing.T) {
 	if got != want {
 		t.Errorf("Consumed delivery = %+v, want %+v", got, want)
 	}
-	if msg.MessageId != "j1:e1" || msg.Priority != topology.HighPriority || msg.DeliveryMode != amqp.Persistent || topology.Attempt(msg.Headers) != 0 {
-		t.Errorf("Consumed message has ID %q, priority %d, delivery mode %d, attempt %d; want %q, %d, %d, 0",
-			msg.MessageId, msg.Priority, msg.DeliveryMode, topology.Attempt(msg.Headers), "j1:e1", topology.HighPriority, amqp.Persistent)
+	if msg.MessageId != "j1:e1" || msg.Priority != topology.HighPriority || msg.DeliveryMode != amqp.Persistent || topology.DeliveryCount(msg.Headers) != 0 {
+		t.Errorf("Consumed message has ID %q, priority %d, delivery mode %d, delivery count %d; want %q, %d, %d, 0",
+			msg.MessageId, msg.Priority, msg.DeliveryMode, topology.DeliveryCount(msg.Headers), "j1:e1", topology.HighPriority, amqp.Persistent)
 	}
 }
 
@@ -130,39 +130,46 @@ func TestPublishDeliveriesToFullQueueIsRejected(t *testing.T) {
 	}
 }
 
-func TestRetryTierReturnsMessageToItsQueue(t *testing.T) {
+// TestSendQueueDelaysRejectedDelivery pins down the broker behaviour the worker's
+// retries rest on: a rejected delivery comes back late and counted, and one that is
+// nacked comes back at once and uncounted.
+func TestSendQueueDelaysRejectedDelivery(t *testing.T) {
 	if testing.Short() {
-		t.Skip("waits for the 5 second retry tier")
+		t.Skip("waits for the first retry delay")
 	}
 	c, appID := newTestClient(t)
 	queue := topology.SendQueue("apns", appID)
 	deleteQueue(t, c, queue)
-	if err := c.declareSendQueue(queue); err != nil {
-		t.Fatalf("Setup: declaring %s: %v", queue, err)
+	d := message.Delivery{MessageID: "j1:e1", JobID: "j1", AppID: appID, Provider: "apns", Address: "token"}
+	if err := c.PublishDeliveries(t.Context(), []message.Delivery{d}, notify.PriorityHigh); err != nil {
+		t.Fatalf("Setup: PublishDeliveries failed: %v", err)
 	}
 	msgs := consume(t, c, queue)
 
-	// What a worker does with a delivery that failed: publish it to a retry tier under
-	// the name of the queue it came from.
-	tier := topology.RetryTiers()[0]
-	msg := amqp.Publishing{Headers: amqp.Table{topology.AttemptHeader: int32(1)}, Priority: topology.HighPriority}
-	conf, err := c.publish(t.Context(), tier.Name, queue, message.Delivery{MessageID: "j1:e1"}, msg)
-	if err != nil {
-		t.Fatalf("Publishing to %s failed: %v", tier.Name, err)
+	// What a worker does with a delivery that failed.
+	first := receive(t, msgs, 5*time.Second)
+	if err := first.Reject(true); err != nil {
+		t.Fatalf("Reject failed: %v", err)
 	}
-	if err := wait(t.Context(), conf); err != nil {
-		t.Fatalf("Publishing to %s was not confirmed: %v", tier.Name, err)
-	}
-	published := time.Now()
+	rejected := time.Now()
 
-	got := receive(t, msgs, tier.Delay+10*time.Second)
-	if err := got.Ack(false); err != nil {
+	second := receive(t, msgs, topology.RetryMinDelay+10*time.Second)
+	if waited := time.Since(rejected); waited < topology.RetryMinDelay-time.Second {
+		t.Errorf("The rejected message came back after %v, want about %v", waited, topology.RetryMinDelay)
+	}
+	if got := topology.DeliveryCount(second.Headers); got != 1 || second.Priority != topology.HighPriority {
+		t.Errorf("The rejected message came back with delivery count %d and priority %d, want 1 and %d", got, second.Priority, topology.HighPriority)
+	}
+
+	// What a worker does with a delivery it did not get to before shutting down.
+	if err := second.Nack(false, true); err != nil {
+		t.Fatalf("Nack failed: %v", err)
+	}
+	third := receive(t, msgs, topology.RetryMinDelay/2)
+	if err := third.Ack(false); err != nil {
 		t.Errorf("Ack failed: %v", err)
 	}
-	if waited := time.Since(published); waited < tier.Delay-time.Second {
-		t.Errorf("The message came back after %v, want about %v", waited, tier.Delay)
-	}
-	if topology.Attempt(got.Headers) != 1 || got.Priority != topology.HighPriority {
-		t.Errorf("The returned message has attempt %d and priority %d, want 1 and %d", topology.Attempt(got.Headers), got.Priority, topology.HighPriority)
+	if got := topology.DeliveryCount(third.Headers); got != 1 {
+		t.Errorf("The nacked message came back with delivery count %d, want it still 1", got)
 	}
 }

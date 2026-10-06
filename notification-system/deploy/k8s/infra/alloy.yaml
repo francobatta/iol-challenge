@@ -1,0 +1,69 @@
+# One Alloy, doing what config.alloy says: following the logs of every pod of the
+# namespace and pushing them to Loki. Nothing calls it, so it has no Service.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alloy
+---
+# It finds the pods by listing them and reads their logs through the Kubernetes API, in
+# this namespace and no other.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: alloy
+rules:
+  - apiGroups: [""]
+    resources: [pods, pods/log]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: alloy
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: alloy
+subjects:
+  - kind: ServiceAccount
+    name: alloy
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alloy
+  labels: {app: alloy}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: alloy}
+  template:
+    metadata:
+      labels: {app: alloy}
+    spec:
+      serviceAccountName: alloy
+      containers:
+        - name: alloy
+          image: grafana/alloy:v1.20.1
+          args:
+            - run
+            - --storage.path=/var/lib/alloy/data
+            # On every address rather than the default, localhost, for the probe's sake.
+            - --server.http.listen-addr=0.0.0.0:12345
+            - /etc/alloy/config.alloy
+          ports:
+            - {name: http, containerPort: 12345}
+          volumeMounts:
+            - {name: config, mountPath: /etc/alloy, readOnly: true}
+            - {name: data, mountPath: /var/lib/alloy/data}
+          readinessProbe:
+            httpGet: {path: /-/ready, port: http}
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 256Mi}
+      volumes:
+        - name: config
+          configMap: {name: alloy-config}
+        - name: data
+          emptyDir: {}

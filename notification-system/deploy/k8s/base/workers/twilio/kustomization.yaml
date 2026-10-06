@@ -1,0 +1,24 @@
+# The twilio worker pool: ../pool with the provider's name filled in. The four pools differ
+# in nothing else; change ../pool to change them all.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../pool
+
+nameSuffix: -twilio
+
+labels:
+  - pairs: {provider: twilio}
+    includeSelectors: true
+    includeTemplates: true
+
+patches:
+  - target: {kind: Deployment, name: worker}
+    patch: |-
+      - {op: replace, path: /spec/template/spec/containers/0/env/0/value, value: twilio}
+  - target: {kind: ScaledObject, name: worker}
+    patch: |-
+      - {op: replace, path: /spec/scaleTargetRef/name, value: worker-twilio}
+      - {op: replace, path: /spec/triggers/0/metadata/queueName, value: '^notify\.send\.twilio\..+'}
+      - {op: replace, path: /spec/triggers/1/metadata/queueName, value: '^notify\.send\.twilio\..+'}

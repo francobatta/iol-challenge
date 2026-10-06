@@ -1,0 +1,73 @@
+# What the notification system needs around it, run inside the cluster: Postgres,
+# RabbitMQ, the mock of the four providers, and what it is watched with: Prometheus for
+# metrics, Tempo for traces, Loki and Alloy for logs, and Grafana to look at all three.
+# Each is a single small instance, enough to prove the system works. A real deployment
+# leaves this directory out and points ../base at managed services and at the real
+# providers.
+#
+# The schema comes from api/db/schema.sql, and the configuration of Grafana, Tempo and
+# Loki from deploy/grafana, deploy/tempo and deploy/loki, which compose reads too. All
+# are outside this directory, which kustomize only reads when told it may:
+#
+#   kubectl kustomize --load-restrictor LoadRestrictionsNone <overlay> | kubectl apply -f -
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: notifications
+
+# Marks everything in this directory, so that cluster-up.sh can apply it before the rest.
+labels:
+  - pairs: {tier: infra}
+
+resources:
+  - postgres.yaml
+  - rabbitmq.yaml
+  - prometheus.yaml
+  - mockprovider.yaml
+  - tempo.yaml
+  - loki.yaml
+  - alloy.yaml
+  - grafana.yaml
+
+configMapGenerator:
+  # Loaded by Postgres once, when the database is first created.
+  - name: db-schema
+    files:
+      - schema.sql=../../../api/db/schema.sql
+  - name: prometheus-config
+    files:
+      - prometheus.yml
+  - name: tempo-config
+    files:
+      - ../../tempo/tempo.yaml
+  - name: loki-config
+    files:
+      - ../../loki/loki.yaml
+  - name: alloy-config
+    files:
+      - config.alloy
+  - name: grafana-datasources
+    files:
+      - ../../grafana/provisioning/datasources/datasources.yaml
+  - name: grafana-dashboard-providers
+    files:
+      - ../../grafana/provisioning/dashboards/dashboards.yaml
+  - name: grafana-dashboards
+    files:
+      - ../../grafana/dashboards/api.json
+      - ../../grafana/dashboards/delivery-pipeline.json
+      - ../../grafana/dashboards/logs.json
+      - ../../grafana/dashboards/processes.json
+
+# Placeholders, as in compose. The URLs in the api-secrets and worker-secrets of the
+# overlay repeat them.
+secretGenerator:
+  - name: postgres
+    literals:
+      - POSTGRES_USER=audience
+      - POSTGRES_PASSWORD=audience
+      - POSTGRES_DB=audience
+  - name: rabbitmq
+    literals:
+      - RABBITMQ_DEFAULT_USER=notify
+      - RABBITMQ_DEFAULT_PASS=notify

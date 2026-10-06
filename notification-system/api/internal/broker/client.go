@@ -143,7 +143,7 @@ func (c *Client) PublishDeliveries(ctx context.Context, deliveries []message.Del
 		}
 		m := msg
 		m.MessageId = d.MessageID
-		m.Headers = amqp.Table{topology.AttemptHeader: int32(0)}
+		m.Headers = amqp.Table{} // a table of its own, for its trace headers
 		conf, err := c.publish(ctx, "", queue, d, m)
 		if err != nil {
 			return err

@@ -431,6 +431,64 @@ func (q *Queries) FinishFanout(ctx context.Context, arg FinishFanoutParams) (int
 	return result.RowsAffected(), nil
 }
 
+const importEndpoints = `-- name: ImportEndpoints :one
+WITH batch AS (
+    -- The four arrays are the same length, so their rows come out side by side.
+    SELECT unnest($1::text[]) AS user_id, unnest($2::text[]) AS channel,
+           unnest($3::text[]) AS provider, unnest($4::text[]) AS address
+), new_users AS (
+    INSERT INTO users (app_id, user_id)
+    SELECT DISTINCT $5::uuid, b.user_id FROM batch b
+    ON CONFLICT DO NOTHING
+    RETURNING 1
+), new_endpoints AS (
+    INSERT INTO endpoints (app_id, user_id, address, channel, provider)
+    SELECT $5::uuid, b.user_id, b.address, b.channel, b.provider FROM batch b
+    ON CONFLICT DO NOTHING
+    RETURNING 1
+), new_members AS (
+    INSERT INTO list_members (app_id, list_id, user_id)
+    SELECT DISTINCT $5::uuid, $6::uuid, b.user_id FROM batch b
+    WHERE $6::uuid IS NOT NULL
+    ON CONFLICT DO NOTHING
+)
+SELECT (SELECT count(*) FROM new_users) AS users, (SELECT count(*) FROM new_endpoints) AS endpoints
+`
+
+type ImportEndpointsParams struct {
+	UserIds   []string
+	Channels  []string
+	Providers []string
+	Addresses []string
+	AppID     pgtype.UUID
+	ListID    pgtype.UUID
+}
+
+type ImportEndpointsRow struct {
+	Users     int64
+	Endpoints int64
+}
+
+// Registers the users of a batch of endpoints, gives them the endpoints and, if there is a
+// list, makes them members of it. Row i of the batch is element i of each array. What
+// already exists is left as it is, and the counts are of what was created.
+//
+// One statement, so a batch is stored whole or not at all, and the foreign keys from
+// endpoints and members to users are checked when it ends, after the users are in.
+func (q *Queries) ImportEndpoints(ctx context.Context, arg ImportEndpointsParams) (ImportEndpointsRow, error) {
+	row := q.db.QueryRow(ctx, importEndpoints,
+		arg.UserIds,
+		arg.Channels,
+		arg.Providers,
+		arg.Addresses,
+		arg.AppID,
+		arg.ListID,
+	)
+	var i ImportEndpointsRow
+	err := row.Scan(&i.Users, &i.Endpoints)
+	return i, err
+}
+
 const insertJob = `-- name: InsertJob :one
 WITH job AS (
     INSERT INTO jobs (app_id, priority, user_ids, list_id, title, body, idempotency_key)

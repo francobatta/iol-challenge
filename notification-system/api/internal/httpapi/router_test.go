@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/mock/gomock"
 
 	"github.com/francobatta/iol-challenge/notification-system/api/internal/audience"
@@ -74,6 +75,8 @@ type mocks struct {
 	audience *audiencetest.MockRepositoryMockRecorder
 	jobs     *notifytest.MockRepositoryMockRecorder
 	prom     *insighttest.MockQuerierMockRecorder
+	// registry is not a mock: it holds the metrics the server reports about its requests.
+	registry *prometheus.Registry
 }
 
 // startTestAPI starts the API over mocks and returns a client holding a token for
@@ -90,9 +93,10 @@ func startTestAPI(t *testing.T) (client, mocks) {
 	}
 	ctrl := gomock.NewController(t)
 	repo, jobs, prom := audiencetest.NewMockRepository(ctrl), notifytest.NewMockRepository(ctrl), insighttest.NewMockQuerier(ctrl)
-	srv := httptest.NewServer(NewRouter(audience.NewService(repo), notify.NewService(jobs), insight.NewService(prom), tokens, testAdminKey))
+	registry := prometheus.NewRegistry()
+	srv := httptest.NewServer(NewRouter(audience.NewService(repo), notify.NewService(jobs), insight.NewService(prom), tokens, testAdminKey, NewMetrics(registry)))
 	t.Cleanup(srv.Close)
-	return client{baseURL: srv.URL, token: tok}, mocks{audience: repo.EXPECT(), jobs: jobs.EXPECT(), prom: prom.EXPECT()}
+	return client{baseURL: srv.URL, token: tok}, mocks{audience: repo.EXPECT(), jobs: jobs.EXPECT(), prom: prom.EXPECT(), registry: registry}
 }
 
 func TestStatus(t *testing.T) {

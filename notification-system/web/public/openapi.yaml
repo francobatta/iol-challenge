@@ -277,6 +277,59 @@ paths:
                   items: { type: array, items: { $ref: "#/components/schemas/User" } }
                   next_after: { $ref: "#/components/schemas/NextAfter" }
 
+  /v1/users/import:
+    post:
+      tags: [Users]
+      summary: Import users and endpoints in bulk
+      description: |
+        Takes a CSV with one endpoint per row and no header:
+
+        ```
+        user_id,channel,provider,address
+        ana,sms,twilio,+5491100000000
+        ana,email,mailchimp,ana@example.com
+        ```
+
+        Each row registers the user if it is new, gives it the endpoint, and adds it to
+        the list if `list_id` is given. Users, endpoints and memberships that already
+        exist are left as they are, so sending the same file twice is safe.
+
+        The file is stored 1,000 rows at a time. A row that is not valid stops the
+        import and is named in the error; the rows stored before its batch stay. The
+        body may be up to 64 MiB.
+
+        ```sh
+        curl -X POST "localhost:8080/v1/users/import?list_id=$LIST_ID" \
+          -H "Authorization: Bearer $TOKEN" -H 'Content-Type: text/csv' \
+          --data-binary @audience.csv
+        ```
+      parameters:
+        - name: list_id
+          in: query
+          description: A list to add every user in the file to.
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          text/csv:
+            schema: { type: string }
+            example: |
+              ana,sms,twilio,+5491100000000
+              ana,email,mailchimp,ana@example.com
+      responses:
+        "200":
+          description: Imported.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rows: { type: integer, description: Rows read and stored., example: 2 }
+                  users: { type: integer, description: Users that were new., example: 1 }
+                  endpoints: { type: integer, description: Endpoints that were new., example: 2 }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /v1/users/{user_id}:
     parameters:
       - $ref: "#/components/parameters/user_id"
@@ -778,7 +831,7 @@ components:
                   queues_subscribed: { type: number }
             queues:
               type: array
-              description: Depth of the retry tiers and the dead-letter queue.
+              description: Depth of the dead-letter queue.
               items:
                 type: object
                 properties:

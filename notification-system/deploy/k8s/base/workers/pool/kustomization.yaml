@@ -1,0 +1,9 @@
+# One worker pool: a Deployment and the ScaledObject that sizes it. It is written for a
+# provider called PROVIDER, which does not exist; the four directories next to this one
+# each turn it into the pool of a real provider.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - deployment.yaml
+  - scaledobject.yaml

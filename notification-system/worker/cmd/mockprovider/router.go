@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/francobatta/iol-challenge/notification-system/commons/health"
 )
 
 const (
@@ -36,6 +38,7 @@ func newRouter(errorRate, throttleRate float64) http.Handler {
 	}
 
 	r := chi.NewRouter()
+	health.Mount(r, nil) // nothing to wait for: it is ready as soon as it listens
 	r.Post("/twilio", answer)
 	r.Post("/mailchimp", answer)
 	r.Post("/apns/{device_token}", answer)

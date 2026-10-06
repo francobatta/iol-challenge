@@ -1,0 +1,51 @@
+# The workers of one provider. Image: worker/Dockerfile.
+#
+# No replica count: the ScaledObject owns it.
+#
+# The Secret worker-secrets holds AMQP_URL and RABBITMQ_API_URL. Workers have no access to
+# the database.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  labels: {app: worker}
+spec:
+  selector:
+    matchLabels: {app: worker}
+  template:
+    metadata:
+      labels: {app: worker}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      # On SIGTERM a worker stops taking deliveries and finishes the ones it is sending.
+      # A provider gets 3s to answer and the outcome 10s to be published, so 30s is ample.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: worker
+          image: notification-system/worker
+          ports:
+            - {name: ops, containerPort: 9090} # metrics and probes
+          env:
+            - {name: PROVIDER, value: PROVIDER} # first on purpose: the pools patch env/0
+          envFrom:
+            - configMapRef: {name: worker-config}
+            - secretRef: {name: worker-secrets}
+          # Ready is "holds its RabbitMQ connection". A worker that loses it exits and is
+          # restarted, so liveness only has to catch a process that is up but stuck.
+          readinessProbe:
+            httpGet: {path: /readyz, port: ops}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: ops}
+            periodSeconds: 10
+          startupProbe:
+            httpGet: {path: /healthz, port: ops}
+            periodSeconds: 2
+            failureThreshold: 30
+          # Sending is waiting on the network: a pod at full concurrency uses a fraction
+          # of a core.
+          resources:
+            requests: {cpu: 250m, memory: 128Mi}
+            limits: {memory: 256Mi}

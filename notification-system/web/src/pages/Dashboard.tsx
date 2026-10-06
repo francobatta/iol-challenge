@@ -224,7 +224,7 @@ function SystemSection({ snapshot }: { snapshot: Snapshot }) {
   const deepest = Math.max(1, ...system.queues.map((queue) => queue.value))
 
   return (
-    <Section title="System" description="Shared by every app: the processes, the worker pools and the queues deliveries wait in to be retried.">
+    <Section title="System" description="Shared by every app: the processes, the worker pools and the dead-letter queue.">
       <Card>
         <CardHeader>
           <CardTitle>Processes</CardTitle>
@@ -301,15 +301,17 @@ function SystemSection({ snapshot }: { snapshot: Snapshot }) {
         </Card>
         <Card>
           <CardHeader>
-            <CardTitle>Retry and dead-letter queues</CardTitle>
-            <CardDescription>A failed delivery waits in each tier in turn; after the last it is dead.</CardDescription>
+            <CardTitle>Dead-letter queue</CardTitle>
+            <CardDescription>
+              A failed delivery waits in its own queue to be retried; one the provider refuses, or that keeps failing, ends up here.
+            </CardDescription>
           </CardHeader>
           <CardContent>
             {system.queues.length === 0 ? (
               <p className="text-sm text-muted-foreground">No queues reported yet.</p>
             ) : (
               <ul className="flex flex-col gap-2">
-                {[...system.queues].sort(byRetryOrder).map((queue) => (
+                {system.queues.map((queue) => (
                   <li key={queue.labels.queue} className="grid grid-cols-[7rem_1fr_3rem] items-center gap-3 text-sm">
                     <span>{queueLabel(queue.labels.queue)}</span>
                     <span className="h-2 overflow-hidden rounded-full bg-muted" aria-hidden>
@@ -388,16 +390,6 @@ function Section(props: { title: string; description: string; children: ReactNod
   )
 }
 
-// The retry tiers in the order a delivery goes through them, then the dead-letter queue.
-const retryOrder = ["notify.retry.5s", "notify.retry.30s", "notify.retry.2m", "notify.retry.10m", "notify.dead"]
-
-function byRetryOrder(a: { labels: Record<string, string> }, b: { labels: Record<string, string> }) {
-  return retryOrder.indexOf(a.labels.queue) - retryOrder.indexOf(b.labels.queue)
-}
-
 function queueLabel(queue: string) {
-  if (queue === "notify.dead") {
-    return "Dead"
-  }
-  return `Retry in ${queue.replace("notify.retry.", "")}`
+  return queue === "notify.dead" ? "Dead" : queue
 }

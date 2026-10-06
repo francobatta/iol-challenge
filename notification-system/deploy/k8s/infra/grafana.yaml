@@ -1,0 +1,68 @@
+# One Grafana, reached as grafana:3000: the dashboards over Prometheus, and Explore over
+# Tempo and Loki. All it shows comes from ../../grafana through three ConfigMaps, so it
+# keeps nothing and may be restarted at will.
+#
+# Anyone who reaches it may look and explore without signing in, and admin / admin is a
+# placeholder like the other credentials here.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  labels: {app: grafana}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: grafana}
+  template:
+    metadata:
+      labels: {app: grafana}
+    spec:
+      containers:
+        - name: grafana
+          image: grafana/grafana:13.2.3
+          env:
+            - {name: GF_AUTH_ANONYMOUS_ENABLED, value: "true"}
+            # Editor rather than Viewer: only an editor may open Explore, where traces
+            # are read.
+            - {name: GF_AUTH_ANONYMOUS_ORG_ROLE, value: Editor}
+            - {name: GF_SECURITY_ADMIN_USER, value: admin}
+            - {name: GF_SECURITY_ADMIN_PASSWORD, value: admin}
+            - {name: GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH, value: /var/lib/grafana/dashboards/delivery-pipeline.json}
+            - {name: GF_ANALYTICS_REPORTING_ENABLED, value: "false"}
+            - {name: GF_ANALYTICS_CHECK_FOR_UPDATES, value: "false"}
+          ports:
+            - {name: http, containerPort: 3000}
+          volumeMounts:
+            - {name: datasources, mountPath: /etc/grafana/provisioning/datasources, readOnly: true}
+            - {name: dashboard-providers, mountPath: /etc/grafana/provisioning/dashboards, readOnly: true}
+            - {name: dashboards, mountPath: /var/lib/grafana/dashboards, readOnly: true}
+          readinessProbe:
+            httpGet: {path: /api/health, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /api/health, port: http}
+            periodSeconds: 10
+          # It sets its database up when it starts, which takes a while on a busy node.
+          startupProbe:
+            httpGet: {path: /api/health, port: http}
+            periodSeconds: 2
+            failureThreshold: 60
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {memory: 512Mi}
+      volumes:
+        - name: datasources
+          configMap: {name: grafana-datasources}
+        - name: dashboard-providers
+          configMap: {name: grafana-dashboard-providers}
+        - name: dashboards
+          configMap: {name: grafana-dashboards}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+spec:
+  selector: {app: grafana}
+  ports:
+    - {name: http, port: 3000, targetPort: http}

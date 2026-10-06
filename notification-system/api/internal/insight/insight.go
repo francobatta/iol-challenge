@@ -89,7 +89,7 @@ type ProviderDeliveries struct {
 type System struct {
 	Targets []Target     `json:"targets"`
 	Pools   []WorkerPool `json:"pools"`
-	Queues  []Sample     `json:"queues"` // depth of the retry tiers and the dead-letter queue, by queue
+	Queues  []Sample     `json:"queues"` // depth of the dead-letter queue, by queue
 
 	// Latency of requests to the providers, in seconds, by provider.
 	LatencyP50 []Series `json:"latency_p50"`

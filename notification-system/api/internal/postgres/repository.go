@@ -310,3 +310,22 @@ func (s *Repository) Members(ctx context.Context, appID, listID string, p audien
 	}
 	return members, nil
 }
+
+func (s *Repository) ImportEndpoints(ctx context.Context, appID, listID string, endpoints []audience.Endpoint) (users, created int, err error) {
+	arg := queries.ImportEndpointsParams{
+		AppID:     toUUID(appID),
+		ListID:    toUUID(listID), // NULL when there is no list
+		UserIds:   make([]string, len(endpoints)),
+		Channels:  make([]string, len(endpoints)),
+		Providers: make([]string, len(endpoints)),
+		Addresses: make([]string, len(endpoints)),
+	}
+	for i, e := range endpoints {
+		arg.UserIds[i], arg.Channels[i], arg.Providers[i], arg.Addresses[i] = e.UserID, string(e.Channel), e.Provider, e.Address
+	}
+	row, err := s.q.ImportEndpoints(ctx, arg)
+	if err != nil {
+		return 0, 0, translate(err, "list")
+	}
+	return int(row.Users), int(row.Endpoints), nil
+}

@@ -172,6 +172,22 @@ func (mr *MockRepositoryMockRecorder) Endpoints(ctx, appID, userID, p any) *gomo
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Endpoints", reflect.TypeOf((*MockRepository)(nil).Endpoints), ctx, appID, userID, p)
 }
 
+// ImportEndpoints mocks base method.
+func (m *MockRepository) ImportEndpoints(ctx context.Context, appID, listID string, endpoints []audience.Endpoint) (int, int, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ImportEndpoints", ctx, appID, listID, endpoints)
+	ret0, _ := ret[0].(int)
+	ret1, _ := ret[1].(int)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// ImportEndpoints indicates an expected call of ImportEndpoints.
+func (mr *MockRepositoryMockRecorder) ImportEndpoints(ctx, appID, listID, endpoints any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ImportEndpoints", reflect.TypeOf((*MockRepository)(nil).ImportEndpoints), ctx, appID, listID, endpoints)
+}
+
 // KnownUsers mocks base method.
 func (m *MockRepository) KnownUsers(ctx context.Context, appID string, userIDs []string) ([]string, error) {
 	m.ctrl.T.Helper()

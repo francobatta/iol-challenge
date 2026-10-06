@@ -1,0 +1,74 @@
+# One RabbitMQ node, reached as rabbitmq: 5672 for AMQP, 15672 for the management API
+# (which the workers and KEDA read the queues from) and 15692 for its metrics.
+#
+# Pinned: how strictly high-priority messages overtake normal ones in a quorum queue
+# differs between RabbitMQ versions. See the README.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rabbitmq
+  labels: {app: rabbitmq}
+spec:
+  # A StatefulSet keeps the hostname of the pod, and the data directory of the node is
+  # named after it.
+  serviceName: rabbitmq
+  replicas: 1
+  selector:
+    matchLabels: {app: rabbitmq}
+  template:
+    metadata:
+      labels: {app: rabbitmq}
+    spec:
+      # Without this the kubelet sets RABBITMQ_PORT and the like from the Service of the
+      # same name, and RabbitMQ reads them as its own configuration.
+      enableServiceLinks: false
+      containers:
+        - name: rabbitmq
+          image: rabbitmq:4.3-management
+          ports:
+            - {name: amqp, containerPort: 5672}
+            - {name: management, containerPort: 15672}
+            - {name: metrics, containerPort: 15692}
+          envFrom:
+            - secretRef: {name: rabbitmq}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/rabbitmq}
+          # The diagnostics start a small Erlang node each time, hence the generous
+          # timeouts and periods.
+          readinessProbe:
+            exec:
+              command: [rabbitmq-diagnostics, -q, check_port_connectivity]
+            periodSeconds: 10
+            timeoutSeconds: 10
+          livenessProbe:
+            exec:
+              command: [rabbitmq-diagnostics, -q, ping]
+            periodSeconds: 30
+            timeoutSeconds: 10
+          startupProbe:
+            exec:
+              command: [rabbitmq-diagnostics, -q, ping]
+            periodSeconds: 5
+            timeoutSeconds: 10
+            failureThreshold: 36
+          resources:
+            requests: {cpu: 200m, memory: 512Mi}
+            limits: {memory: 2Gi}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests: {storage: 2Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq
+spec:
+  selector: {app: rabbitmq}
+  ports:
+    - {name: amqp, port: 5672, targetPort: amqp}
+    - {name: management, port: 15672, targetPort: management}
+    - {name: metrics, port: 15692, targetPort: metrics}

@@ -52,6 +52,19 @@ describe("calls as the app", () => {
     expect(JSON.parse(request?.body as string)).toEqual({ user_ids: ["ana"], priority: "high", content: { title: "", body: "hi" } })
   })
 
+  it("sends an import file as it is, as CSV", async () => {
+    const fetch = stubFetch(answer(200, { rows: 1, users: 1, endpoints: 1 }))
+    setSession({ token: "tok", onUnauthorized: () => {} })
+    const file = new Blob(["ana,sms,twilio,+5491100000000\n"])
+
+    await expect(api.importUsers(file, "l1")).resolves.toEqual({ rows: 1, users: 1, endpoints: 1 })
+
+    expect(fetch.mock.calls[0][0]).toBe("/v1/users/import?list_id=l1")
+    const request = fetch.mock.calls[0][1]
+    expect(request?.body).toBe(file)
+    expect(request?.headers).toMatchObject({ "Content-Type": "text/csv", Authorization: "Bearer tok" })
+  })
+
   it("returns nothing for an answer without content", async () => {
     stubFetch(answer(204))
     setSession({ token: "tok", onUnauthorized: () => {} })

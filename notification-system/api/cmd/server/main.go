@@ -1,11 +1,5 @@
 // Command server runs the audience and notification REST API, and next to it the
 // goroutines that dispatch the notifications it accepts. See package dispatch for those.
-//
-// It is configured through the environment; the config type lists the variables, and
-// ../../.env has values for local development. dependencies.go shows what the server is
-// made of.
-//
-// Any number of servers may run at once.
 package main
 
 import (
@@ -49,7 +43,7 @@ func run(ctx context.Context) error {
 	// Every goroutine ends when ctx is cancelled, and one that fails cancels the others.
 	g, ctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return httpserver.Run(ctx, cfg.Addr, deps.router) })
-	g.Go(func() error { return httpserver.Run(ctx, cfg.MetricsAddr, deps.metricsRouter) })
+	g.Go(func() error { return httpserver.Run(ctx, cfg.MetricsAddr, deps.opsRouter) })
 	g.Go(func() error {
 		deps.fanout.Run(ctx, fanoutConcurrency, dispatch.DefaultPollInterval)
 		return nil

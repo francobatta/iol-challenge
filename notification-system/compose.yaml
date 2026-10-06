@@ -2,7 +2,11 @@
 # whose credentials are placeholders, not secrets.
 #
 # There is no autoscaling here: each provider gets one worker. The Kubernetes manifests
-# in deploy/k8s scale the same images with KEDA.
+# in deploy/k8s scale the same images with KEDA; deploy/cluster-up.sh runs them.
+
+# Spelled out, although it is the name of this directory, because Alloy picks the
+# containers whose logs it follows by it. See deploy/alloy/config.alloy.
+name: notification-system
 
 # Both images are built from this directory, because they share the commons module.
 x-api-image: &api-image
@@ -52,7 +56,7 @@ services:
   rabbitmq:
     # Pinned: how strictly high-priority messages overtake normal ones in a quorum
     # queue differs between RabbitMQ versions. See the README.
-    image: rabbitmq:4.1-management
+    image: rabbitmq:4.3-management
     hostname: rabbitmq # the node's data directory is named after it
     environment:
       RABBITMQ_DEFAULT_USER: notify
@@ -76,6 +80,62 @@ services:
     ports:
       - "9090:9090"
 
+  # The four below are how an operator watches the system: Grafana shows the metrics of
+  # Prometheus, the traces of Tempo and the logs of Loki. None of them keeps anything
+  # across a restart. See the README, under Monitoring.
+
+  # Dashboards, traces and logs, on localhost:3001. Everything it shows is set up from
+  # deploy/grafana; what is changed in the browser is not kept. Anyone may look and
+  # explore without signing in, and admin / admin is a placeholder like the other
+  # credentials here.
+  grafana:
+    image: grafana/grafana:13.2.3
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      # Editor rather than Viewer: only an editor may open Explore, where traces are read.
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Editor
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/delivery-pipeline.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3001:3000" # 3000 is the console
+    depends_on:
+      - prometheus
+      - tempo
+      - loki
+
+  # Takes the traces the api and the workers export to tempo:4318.
+  tempo:
+    image: grafana/tempo:3.1.0
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    volumes:
+      - ./deploy/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+
+  # Takes the log lines Alloy pushes.
+  loki:
+    image: grafana/loki:3.7.8
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    volumes:
+      - ./deploy/loki/loki.yaml:/etc/loki/loki.yaml:ro
+
+  # Follows the output of every container here and pushes it to Loki.
+  alloy:
+    image: grafana/alloy:v1.20.1
+    command: ["run", "--storage.path=/var/lib/alloy/data", "/etc/alloy/config.alloy"]
+    volumes:
+      - ./deploy/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      # How it finds the containers and reads their output. The socket tells about every
+      # container on the machine, not only these: fine on a development machine, and the
+      # reason the cluster does it another way (deploy/k8s/infra/alloy.yaml).
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - loki
+
   api:
     <<: *broker
     build: *api-image
@@ -87,7 +147,7 @@ services:
       db:
         condition: service_healthy
 
-  # The console: the React app, and /v1 passed on to the api. See web/nginx.conf.
+  # The console: the React app, and /v1 passed on to the api. See web/nginx.conf.template.
   web:
     build: ./web
     ports:

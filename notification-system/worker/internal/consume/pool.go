@@ -127,14 +127,10 @@ func (p *Pool) subscribe(ctx context.Context, queue string) error {
 			p.wg.Go(func() {
 				// At most prefetch of these run per queue: the broker sends no more
 				// until one is settled.
-				if p.handler.Handle(ctx, messageFrom(queue, d)) {
-					if err := d.Ack(false); err != nil {
-						slog.ErrorContext(ctx, "Could not acknowledge a delivery; it will be handled again", "queue", queue, "err", err)
-					}
-					return
-				}
-				if err := d.Nack(false, true); err != nil {
-					slog.ErrorContext(ctx, "Could not return a delivery to its queue", "queue", queue, "err", err)
+				// If settling fails the channel is gone, and the broker delivers the
+				// message again.
+				if err := settle(d, p.handler.Handle(ctx, messageFrom(queue, d))); err != nil {
+					slog.ErrorContext(ctx, "Could not settle a delivery; it will be handled again", "queue", queue, "err", err)
 				}
 			})
 		}
@@ -146,6 +142,22 @@ func (p *Pool) subscribe(ctx context.Context, queue string) error {
 		p.mu.Unlock()
 	})
 	return nil
+}
+
+// settle tells the broker what the handler decided about d. The difference between
+// rejecting and nacking with requeue matters: only a reject counts as a failed
+// delivery, which is what the broker delays and limits.
+func settle(d amqp.Delivery, v Verdict) error {
+	switch v {
+	case Sent:
+		return d.Ack(false)
+	case Retry:
+		return d.Reject(true)
+	case Dead:
+		return d.Reject(false)
+	default:
+		return d.Nack(false, true)
+	}
 }
 
 func (p *Pool) stop() {

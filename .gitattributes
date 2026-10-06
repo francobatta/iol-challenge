@@ -1,0 +1,2 @@
+# Shell scripts run on Linux and macOS too, and inside containers: never CRLF.
+*.sh text eol=lf

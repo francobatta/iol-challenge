@@ -8,6 +8,11 @@ COPY . .
 RUN npm run build
 
 FROM nginx:1.29-alpine
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# Where nginx finds the API, and the DNS server it asks. The defaults are those of
+# compose: Docker's resolver and the api service.
+ENV DNS_RESOLVER=127.0.0.11 \
+    API_URL=http://api:8080
+# The image turns templates in this directory into /etc/nginx/conf.d when it starts.
+COPY nginx.conf.template /etc/nginx/templates/default.conf.template
 COPY --from=build /app/dist /usr/share/nginx/html
 EXPOSE 80

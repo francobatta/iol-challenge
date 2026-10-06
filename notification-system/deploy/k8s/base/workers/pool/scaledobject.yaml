@@ -1,0 +1,59 @@
+# Autoscaling of one worker pool with KEDA (https://keda.sh), on the queues of its own
+# provider.
+#
+# Sizing, from the design document:
+#
+#   a pod runs 200 sends at once, and a send takes 0.5s on average
+#   => a pod delivers about 400 notifications per second
+#
+# Two triggers; KEDA scales to whichever asks for more pods.
+#
+#   MessageRate, 300/s per pod: publishes to the pool's queues, summed. This sizes the
+#     pool for the traffic arriving, at 75% of what a pod can do, and is what holds the
+#     pool steady: when the pool keeps up the queues are empty and queue length says
+#     nothing.
+#   QueueLength, 400 per pod: messages in the pool's queues, summed. A backlog means the
+#     rate trigger was not enough (a burst, or few apps active so that pods are not at
+#     full concurrency), and one pod-second of backlog per pod adds pods until it drains.
+#
+# Both need the management API (protocol: http), as does matching queues by regex. Its
+# URL, with credentials, is the RABBITMQ_API_URL of the worker containers (hostFromEnv),
+# which KEDA reads out of the worker-secrets Secret the Deployment refers to. KEDA calls
+# it from its own namespace, so the host in it has to be a full name, not just "rabbitmq".
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker
+spec:
+  scaleTargetRef:
+    name: worker # patched per pool
+  # Never zero: the first notification after a quiet spell would wait for a pod to start.
+  minReplicaCount: 1
+  maxReplicaCount: 20
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          # Traffic comes in bursts; do not give pods back between two of them.
+          stabilizationWindowSeconds: 120
+  triggers:
+    - type: rabbitmq
+      metadata:
+        hostFromEnv: RABBITMQ_API_URL
+        protocol: http
+        vhostName: /
+        queueName: ^notify\.send\.PROVIDER\..+ # patched per pool
+        useRegex: "true"
+        operation: sum
+        mode: MessageRate
+        value: "300"
+    - type: rabbitmq
+      metadata:
+        hostFromEnv: RABBITMQ_API_URL
+        protocol: http
+        vhostName: /
+        queueName: ^notify\.send\.PROVIDER\..+ # patched per pool
+        useRegex: "true"
+        operation: sum
+        mode: QueueLength
+        value: "400"

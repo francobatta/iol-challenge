@@ -1,0 +1,54 @@
+# What the in-cluster Prometheus scrapes. It yields the same series as the Prometheus of
+# compose (../../prometheus/prometheus.yml), so GET /v1/metrics and the queries in the
+# README work on both: every series about an app on a provider carries the labels
+# provider and app_id, and job is api, worker or rabbitmq.
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  # The api and the workers: every pod of the namespace that asks for it with the
+  # annotation prometheus.io/scrape, on the port its prometheus.io/port names. Pods are
+  # found through the Kubernetes API, so workers added by KEDA are scraped as they start.
+  - job_name: pods
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          own_namespace: true
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        regex: "true"
+        action: keep
+      # A pod that is starting or gone has nothing to say.
+      - source_labels: [__meta_kubernetes_pod_phase]
+        regex: Running
+        action: keep
+      # Discovery yields a target per declared container port; they all become the one
+      # the annotation names, and Prometheus drops the duplicates.
+      - source_labels: [__meta_kubernetes_pod_ip, __meta_kubernetes_pod_annotation_prometheus_io_port]
+        regex: (.+);(.+)
+        target_label: __address__
+        replacement: $1:$2
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        target_label: job
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+
+  # The rabbitmq_prometheus plugin. Its default endpoint aggregates over queues; this one
+  # returns the chosen metrics per queue, here the message counts.
+  - job_name: rabbitmq
+    metrics_path: /metrics/detailed
+    params:
+      family: [queue_coarse_metrics]
+    static_configs:
+      - targets: ["rabbitmq:15692"]
+    # A send queue is named notify.send.<provider>.<app_id>. Spelling that out as labels
+    # lets its metrics be joined with those of the api and the workers.
+    metric_relabel_configs:
+      - source_labels: [queue]
+        regex: notify\.send\.([^.]+)\.(.+)
+        target_label: provider
+        replacement: $1
+      - source_labels: [queue]
+        regex: notify\.send\.([^.]+)\.(.+)
+        target_label: app_id
+        replacement: $2

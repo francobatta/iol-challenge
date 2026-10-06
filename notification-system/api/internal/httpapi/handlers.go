@@ -1,6 +1,9 @@
 package httpapi
 
 import (
+	"encoding/csv"
+	"errors"
+	"io"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -85,6 +88,40 @@ func (s *server) createEndpoint(w http.ResponseWriter, r *http.Request, appID st
 		return err
 	}
 	writeJSON(w, http.StatusCreated, e)
+	return nil
+}
+
+// importUsers reads a CSV of endpoints, one per row and without a header:
+//
+//	user_id,channel,provider,address
+//
+// The body is read as it is stored, so its size is bounded by maxImportBytes rather
+// than by memory.
+func (s *server) importUsers(w http.ResponseWriter, r *http.Request, appID string) error {
+	body := csv.NewReader(http.MaxBytesReader(w, r.Body, maxImportBytes))
+	body.FieldsPerRecord = 4
+	body.ReuseRecord = true
+	rows := func(yield func(audience.Endpoint, error) bool) {
+		for {
+			rec, err := body.Read()
+			if errors.Is(err, io.EOF) {
+				return
+			}
+			if err != nil {
+				yield(audience.Endpoint{}, err)
+				return
+			}
+			e := audience.Endpoint{UserID: rec[0], Channel: audience.Channel(rec[1]), Provider: rec[2], Address: rec[3]}
+			if !yield(e, nil) {
+				return
+			}
+		}
+	}
+	res, err := s.audiences.Import(r.Context(), appID, r.URL.Query().Get("list_id"), rows)
+	if err != nil {
+		return err
+	}
+	writeJSON(w, http.StatusOK, res)
 	return nil
 }
 

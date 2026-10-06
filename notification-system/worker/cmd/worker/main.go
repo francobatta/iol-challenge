@@ -58,7 +58,7 @@ func run(ctx context.Context) error {
 	poolErr := make(chan error, 1)
 	go func() { defer cancel(); poolErr <- deps.pool.Run(ctx) }()
 	metricsErr := make(chan error, 1)
-	go func() { defer cancel(); metricsErr <- httpserver.Run(ctx, cfg.MetricsAddr, deps.metricsRouter) }()
+	go func() { defer cancel(); metricsErr <- httpserver.Run(ctx, cfg.MetricsAddr, deps.opsRouter) }()
 
 	slog.Info("Sending", "provider", cfg.Provider, "concurrency", cfg.Concurrency, "prefetch", cfg.Prefetch, "metrics_addr", cfg.MetricsAddr)
 	return errors.Join(<-poolErr, <-metricsErr)

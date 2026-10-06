@@ -1,0 +1,57 @@
+# The REST API, which also dispatches the notifications it accepts. Image: api/Dockerfile.
+#
+# Any number of replicas may run: they share fan-out through the fanouts table. Two is for
+# availability, not load.
+#
+# The Secret api-secrets holds DATABASE_URL, AMQP_URL, JWT_SECRET and ADMIN_KEY.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  labels: {app: api}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: api}
+  template:
+    metadata:
+      labels: {app: api}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      containers:
+        - name: api
+          image: notification-system/api
+          ports:
+            - {name: http, containerPort: 8080}
+            - {name: ops, containerPort: 9090} # metrics and probes
+          envFrom:
+            - configMapRef: {name: api-config}
+            - secretRef: {name: api-secrets}
+          # Ready is "reaches Postgres". RabbitMQ is deliberately not part of it: the API
+          # accepts notifications while the broker is down and dispatches them later.
+          readinessProbe:
+            httpGet: {path: /readyz, port: ops}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: ops}
+            periodSeconds: 10
+          # The server exits if it cannot reach Postgres or RabbitMQ when it starts, and
+          # is restarted; this only covers a slow first connection.
+          startupProbe:
+            httpGet: {path: /healthz, port: ops}
+            periodSeconds: 2
+            failureThreshold: 30
+          resources:
+            requests: {cpu: 250m, memory: 128Mi}
+            limits: {memory: 256Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+spec:
+  selector: {app: api}
+  ports:
+    - {name: http, port: 8080, targetPort: http}

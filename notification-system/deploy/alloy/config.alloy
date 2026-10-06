@@ -1,0 +1,54 @@
+// What the Alloy of compose.yaml does: it follows the output of every container of this
+// compose project and pushes the lines to Loki. The services need to know nothing about
+// it; they keep writing to stdout and stderr.
+//
+// Every line gets the label service, the name of its compose service, except that the
+// four worker pools share service="worker" and are told apart by provider. That is how
+// the same lines are labelled on Kubernetes (see ../k8s/infra/config.alloy), so the
+// Grafana dashboards work on both.
+
+discovery.docker "containers" {
+	host = "unix:///var/run/docker.sock"
+
+	// The socket lists every container on the machine; only ours are followed.
+	filter {
+		name   = "label"
+		values = ["com.docker.compose.project=notification-system"]
+	}
+}
+
+discovery.relabel "containers" {
+	targets = discovery.docker.containers.targets
+
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+		target_label  = "service"
+	}
+
+	// worker-twilio becomes service="worker", provider="twilio".
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+		regex         = "worker-(.+)"
+		target_label  = "provider"
+		replacement   = "$1"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+		regex         = "worker-.+"
+		target_label  = "service"
+		replacement   = "worker"
+	}
+}
+
+loki.source.docker "containers" {
+	host       = "unix:///var/run/docker.sock"
+	targets    = discovery.relabel.containers.output
+	forward_to = [loki.write.loki.receiver]
+}
+
+loki.write "loki" {
+	endpoint {
+		url = "http://loki:3100/loki/api/v1/push"
+	}
+}

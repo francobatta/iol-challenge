@@ -1,0 +1,26 @@
+# The Tempo of compose.yaml and of deploy/k8s/infra: one process that takes the traces
+# the api and the workers export, and answers Grafana's questions about them.
+#
+# Traces are stored in the container's own filesystem, so a restart forgets them. They
+# are here to show the system working, not to be the record of it.
+server:
+  http_listen_port: 3200 # what Grafana queries
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        # Where OTEL_EXPORTER_OTLP_ENDPOINT of the services points.
+        http:
+          endpoint: 0.0.0.0:4318
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/blocks
+    wal:
+      path: /var/tempo/wal
+
+usage_report:
+  reporting_enabled: false

@@ -29,8 +29,8 @@ type server struct {
 
 // NewRouter returns the handler for the whole API. Requests to create an app must
 // carry adminKey in the X-Admin-Key header; all other requests must carry a token
-// issued by tokens.
-func NewRouter(audiences *audience.Service, notifications *notify.Service, insights *insight.Service, tokens *token.Signer, adminKey string) http.Handler {
+// issued by tokens. Every request, whatever becomes of it, is reported on metrics.
+func NewRouter(audiences *audience.Service, notifications *notify.Service, insights *insight.Service, tokens *token.Signer, adminKey string, metrics *Metrics) http.Handler {
 	s := &server{audiences: audiences, notifications: notifications, insights: insights, tokens: tokens, adminKey: adminKey}
 
 	r := chi.NewRouter()
@@ -44,6 +44,7 @@ func NewRouter(audiences *audience.Service, notifications *notify.Service, insig
 
 		r.Route("/users", func(r chi.Router) {
 			r.Method(http.MethodGet, "/", appHandler(s.users))
+			r.Method(http.MethodPost, "/import", appHandler(s.importUsers))
 			r.Method(http.MethodPut, "/{user_id}", appHandler(s.registerUser))
 			r.Method(http.MethodGet, "/{user_id}", appHandler(s.user))
 			r.Method(http.MethodDelete, "/{user_id}", appHandler(s.deleteUser))
@@ -77,5 +78,5 @@ func NewRouter(audiences *audience.Service, notifications *notify.Service, insig
 
 		r.Method(http.MethodGet, "/metrics", appHandler(s.metrics))
 	})
-	return r
+	return metrics.instrument(r)
 }

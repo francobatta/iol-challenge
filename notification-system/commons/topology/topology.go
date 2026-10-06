@@ -1,5 +1,5 @@
-// Package topology is the RabbitMQ layout the notification system runs on: the queues
-// and exchanges, how they are declared, and the headers its messages carry.
+// Package topology is the RabbitMQ layout the notification system runs on: the queues,
+// how they are declared, and the headers its messages carry.
 //
 // Every service declares the layout through this package, so they always agree on it.
 // RabbitMQ refuses a declaration that differs from an existing queue, which means a
@@ -29,13 +29,18 @@ const (
 	// HighPriority is the AMQP priority of deliveries of high-priority jobs. Normal
 	// deliveries carry none.
 	HighPriority = 9
-	// AttemptHeader counts how many times a message has been retried. Read it with
-	// Attempt.
-	AttemptHeader = "x-attempt"
+	// DeliveryCountHeader is set by the broker on a message it delivers again: how many
+	// deliveries of it have failed before. Read it with DeliveryCount.
+	DeliveryCountHeader = "x-delivery-count"
 
-	// deliveryLimit is how many times a delivery may be handed to a worker that then
-	// dies or returns it, before the broker moves it to DeadQueue.
-	deliveryLimit = 20
+	// deliveryLimit is how many deliveries of a message may fail, because the worker
+	// rejected it or died holding it, before the broker moves it to DeadQueue.
+	deliveryLimit = 10
+	// A rejected delivery waits before it is delivered again: RetryMinDelay times how
+	// often it has failed, up to RetryMaxDelay. This is the delayed retry of quorum
+	// queues, which needs RabbitMQ 4.3.
+	RetryMinDelay = 10 * time.Second
+	RetryMaxDelay = 5 * time.Minute
 )
 
 // SendQueue returns the name of the queue holding an app's deliveries for a provider.
@@ -49,55 +54,17 @@ func SendQueuePrefix(provider string) string {
 	return "notify.send." + provider + "."
 }
 
-// A RetryTier delays messages. A message published to the exchange Name with a queue
-// name as routing key reappears in that queue after Delay.
-type RetryTier struct {
-	Name  string // of both the exchange and the queue behind it
-	Delay time.Duration
-}
-
-// RetryTiers returns the retry tiers, shortest delay first.
-func RetryTiers() []RetryTier {
-	return []RetryTier{
-		{Name: "notify.retry.5s", Delay: 5 * time.Second},
-		{Name: "notify.retry.30s", Delay: 30 * time.Second},
-		{Name: "notify.retry.2m", Delay: 2 * time.Minute},
-		{Name: "notify.retry.10m", Delay: 10 * time.Minute},
-	}
-}
-
 func quorumArgs(extra amqp.Table) amqp.Table {
 	args := amqp.Table{"x-queue-type": "quorum"}
 	maps.Copy(args, extra)
 	return args
 }
 
-// Declare declares every queue and exchange but the per-app send queues, which are
-// declared with DeclareSendQueue when an app first sends.
+// Declare declares every queue but the per-app send queues, which are declared with
+// DeclareSendQueue when an app first sends.
 func Declare(ch *amqp.Channel) error {
 	if _, err := ch.QueueDeclare(DeadQueue, true, false, false, false, quorumArgs(nil)); err != nil {
 		return fmt.Errorf("declaring queue %s: %v", DeadQueue, err)
-	}
-	for _, tier := range RetryTiers() {
-		if err := ch.ExchangeDeclare(tier.Name, amqp.ExchangeTopic, true, false, false, false, nil); err != nil {
-			return fmt.Errorf("declaring exchange %s: %v", tier.Name, err)
-		}
-		// An expired message is dead-lettered to the default exchange under the routing
-		// key it arrived with, which is the name of the queue it has to go back to.
-		// At-least-once dead-lettering keeps it here while that queue is full; the
-		// broker only offers it together with reject-publish.
-		args := quorumArgs(amqp.Table{
-			"x-message-ttl":          tier.Delay.Milliseconds(),
-			"x-dead-letter-exchange": "",
-			"x-dead-letter-strategy": "at-least-once",
-			"x-overflow":             "reject-publish",
-		})
-		if _, err := ch.QueueDeclare(tier.Name, true, false, false, false, args); err != nil {
-			return fmt.Errorf("declaring queue %s: %v", tier.Name, err)
-		}
-		if err := ch.QueueBind(tier.Name, "#", tier.Name, false, nil); err != nil {
-			return fmt.Errorf("binding queue %s: %v", tier.Name, err)
-		}
 	}
 	return nil
 }
@@ -109,6 +76,11 @@ func DeclareSendQueue(ch *amqp.Channel, name string, maxLength int) error {
 		"x-max-length":     int64(maxLength),
 		"x-overflow":       "reject-publish",
 		"x-delivery-limit": int64(deliveryLimit),
+		// Only failed deliveries wait. One a worker returns untouched, because it is
+		// shutting down, is available again at once.
+		"x-delayed-retry-type": "failed",
+		"x-delayed-retry-min":  RetryMinDelay.Milliseconds(),
+		"x-delayed-retry-max":  RetryMaxDelay.Milliseconds(),
 		// The default exchange routes by queue name, so this dead-letters to DeadQueue.
 		"x-dead-letter-exchange":    "",
 		"x-dead-letter-routing-key": DeadQueue,
@@ -120,10 +92,11 @@ func DeclareSendQueue(ch *amqp.Channel, name string, maxLength int) error {
 	return nil
 }
 
-// Attempt returns how many times the message with these headers has been retried.
-func Attempt(headers amqp.Table) int {
+// DeliveryCount returns how many deliveries of the message with these headers have
+// failed.
+func DeliveryCount(headers amqp.Table) int {
 	// The client decodes an integer header as the narrowest type that holds it.
-	switch n := headers[AttemptHeader].(type) {
+	switch n := headers[DeliveryCountHeader].(type) {
 	case int:
 		return n
 	case int8:

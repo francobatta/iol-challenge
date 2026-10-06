@@ -1,0 +1,45 @@
+// What the in-cluster Alloy does: it follows the logs of every pod of its namespace
+// through the Kubernetes API and pushes the lines to Loki. It yields the same labels as
+// the Alloy of compose (../../alloy/config.alloy), so the Grafana dashboards work on
+// both: service is the pod's app label, and the workers also carry their provider.
+//
+// Reading through the API takes one Deployment and the right to read pods and their
+// logs. Nothing runs on every node and nothing of the node is mounted.
+
+discovery.kubernetes "pods" {
+	role = "pod"
+
+	namespaces {
+		own_namespace = true
+	}
+}
+
+discovery.relabel "pods" {
+	targets = discovery.kubernetes.pods.targets
+
+	rule {
+		source_labels = ["__meta_kubernetes_pod_label_app"]
+		target_label  = "service"
+	}
+
+	rule {
+		source_labels = ["__meta_kubernetes_pod_label_provider"]
+		target_label  = "provider"
+	}
+
+	rule {
+		source_labels = ["__meta_kubernetes_pod_name"]
+		target_label  = "pod"
+	}
+}
+
+loki.source.kubernetes "pods" {
+	targets    = discovery.relabel.pods.output
+	forward_to = [loki.write.loki.receiver]
+}
+
+loki.write "loki" {
+	endpoint {
+		url = "http://loki:3100/loki/api/v1/push"
+	}
+}

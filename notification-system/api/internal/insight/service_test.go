@@ -137,7 +137,7 @@ func TestSnapshotSystem(t *testing.T) {
 			"count by (provider)":                          {sample(2, "provider", "twilio")},
 			"sum by (provider) (notify_sends_in_flight)":   {sample(9, "provider", "twilio")},
 			"max by (provider) (notify_queues_subscribed)": {sample(3, "provider", "twilio")},
-			"sum by (queue)":                               {sample(4, "queue", "notify.retry.5s"), sample(1, "queue", "notify.dead")},
+			"sum by (queue)":                               {sample(1, "queue", "notify.dead")},
 		},
 	})
 
@@ -158,7 +158,7 @@ func TestSnapshotSystem(t *testing.T) {
 			{Provider: "apns"},
 			{Provider: "fcm"},
 		},
-		Queues:     []insight.Sample{sample(1, "queue", "notify.dead"), sample(4, "queue", "notify.retry.5s")},
+		Queues:     []insight.Sample{sample(1, "queue", "notify.dead")},
 		LatencyP50: none, LatencyP95: none, LatencyP99: none,
 		SendsInFlight: none, FanoutPagesRate: none, FanoutRejectedRate: none,
 	}

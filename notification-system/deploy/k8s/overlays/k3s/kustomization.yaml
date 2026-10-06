@@ -1,0 +1,50 @@
+# Everything, on one k3s node: the system (../../base), what it needs around it
+# (../../infra), and the differences a single small node calls for. ../../../cluster-up.sh
+# builds the images, creates the cluster and applies this.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: notifications
+
+resources:
+  - ../../base
+  - ../../infra
+  - nodeports.yaml
+
+# The images cluster-up.sh builds and loads into the node; nothing is pulled.
+images:
+  - {name: notification-system/api, newTag: k3s}
+  - {name: notification-system/worker, newTag: k3s}
+  - {name: notification-system/web, newTag: k3s}
+
+# Development placeholders, the same as in compose and in ../../infra. A real overlay
+# takes these from a secret store.
+secretGenerator:
+  - name: api-secrets
+    literals:
+      - DATABASE_URL=postgres://audience:audience@db:5432/audience
+      - AMQP_URL=amqp://notify:notify@rabbitmq:5672/
+      - JWT_SECRET=dev-jwt-secret
+      - ADMIN_KEY=dev-admin-key
+  - name: worker-secrets
+    literals:
+      - AMQP_URL=amqp://notify:notify@rabbitmq:5672/
+      # Written in full because KEDA reads this too, and it is in another namespace, where
+      # the short name rabbitmq means nothing.
+      - RABBITMQ_API_URL=http://notify:notify@rabbitmq.notifications.svc.cluster.local:15672
+
+patches:
+  # The KEDA targets are the production ones; only the size of the answer changes. Six
+  # pods a pool is what one node takes comfortably, and pods are given back after 30s
+  # of calm rather than 120s so that a load test sees the pools shrink again.
+  - target: {kind: ScaledObject}
+    patch: |-
+      - {op: replace, path: /spec/maxReplicaCount, value: 6}
+      - {op: replace, path: /spec/advanced/horizontalPodAutoscalerConfig/behavior/scaleDown/stabilizationWindowSeconds, value: 30}
+  # 24 workers have to fit on the node, next to everything else.
+  - target: {kind: Deployment, labelSelector: app=worker}
+    patch: |-
+      - {op: replace, path: /spec/template/spec/containers/0/resources/requests, value: {cpu: 50m, memory: 48Mi}}
+  - target: {kind: Deployment, name: api}
+    patch: |-
+      - {op: replace, path: /spec/template/spec/containers/0/resources/requests, value: {cpu: 100m, memory: 64Mi}}

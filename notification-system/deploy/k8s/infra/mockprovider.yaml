@@ -1,0 +1,43 @@
+# Stands in for Twilio, Mailchimp, APNs and FCM. It is the second binary in the worker
+# image. Set ERROR_RATE or THROTTLE_RATE (0 to 1) to make it answer 500 or 429 that often:
+#
+#   kubectl -n notifications set env deployment/mockprovider THROTTLE_RATE=0.9
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mockprovider
+  labels: {app: mockprovider}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: mockprovider}
+  template:
+    metadata:
+      labels: {app: mockprovider}
+    spec:
+      containers:
+        - name: mockprovider
+          image: notification-system/worker
+          command: [/mockprovider]
+          ports:
+            - {name: http, containerPort: 8081}
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+          # It holds every request for half a second on average, so at full load it has
+          # thousands open at once; they cost memory, not CPU.
+          resources:
+            requests: {cpu: 100m, memory: 64Mi}
+            limits: {memory: 512Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mockprovider
+spec:
+  selector: {app: mockprovider}
+  ports:
+    - {name: http, port: 8081, targetPort: http}
