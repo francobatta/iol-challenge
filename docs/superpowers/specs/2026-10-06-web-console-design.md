@@ -1,0 +1,199 @@
+# Web console for the notification system
+
+## Context
+
+The notification system (`notification-system/`) is only usable through `curl`, and what
+becomes of deliveries is only visible by typing PromQL into the Prometheus UI. The README
+already anticipates "a page that shows this to an app's owner". This adds that page: a
+small React console in which an app logs in with its JWT, manages its users and lists,
+sends notifications, and watches a dashboard built from every metric the system exports.
+
+Decided with the user:
+
+- **Dashboard**: in-app, Grafana-inspired, fed by a BFF that lives **inside the existing Go
+  API** (new `/v1/metrics` route behind the existing `authenticateApp` middleware).
+  Prometheus has no auth, so the browser never talks to it; the API filters per-app series
+  by the token's `app_id`.
+- **Login**: paste an existing token, or create an app (name + admin key) and be logged in
+  with the token that returns.
+
+Assumptions of mine (say so if wrong):
+
+- "Create users" includes managing a user's **endpoints**, since a user without one receives
+  nothing.
+- The dashboard's *System* section (worker latency, runtime, retry queues) is aggregate and
+  visible to any logged-in app; only the per-app series are scoped.
+- Node is not installed on this machine, so every `npm` command runs in a `node:22-alpine`
+  container, and the app is served by compose.
+
+## Shape
+
+```
+browser ──> web (nginx :3000) ──/v1/*──> api :8080 ──PromQL──> prometheus :9090
+              static SPA                   └─ Postgres, RabbitMQ (as today)
+```
+
+nginx (and the Vite dev server) proxy `/v1` to the API, so there is no CORS to configure.
+
+## 1. Backend: the metrics BFF (`notification-system/api`)
+
+One route, one snapshot. `GET /v1/metrics?range=5m|15m|1h|6h` (default `15m`) returns
+everything the dashboard draws, so the page makes one request per refresh and PromQL stays
+on the server.
+
+New package **`internal/insight`** (service layer, same pattern as `audience`/`notify`: it
+declares the interface it needs next to itself):
+
+- `insight.go` — the `Snapshot` types (JSON) and
+  `type Querier interface { Query(ctx, promql string, at time.Time) (model.Vector, error); QueryRange(ctx, promql string, r Range) (model.Matrix, error) }`
+  with a `//go:generate mockgen` line → `insighttest/mock.go`.
+- `service.go` — `Service.Snapshot(ctx, appID, window)`: builds the fixed query set, runs it
+  concurrently with `errgroup`, and assembles the snapshot. Step = window/60 (min 5s, the
+  scrape interval) so every chart has ~60 points whatever the range. `appID` is written
+  into the label matcher with `strconv.Quote`.
+- `service_test.go` — table tests over the mock querier: queries carry the app's ID,
+  vectors/matrices are mapped to the right fields, a query error fails the snapshot.
+
+New package **`internal/prom`** (client layer): `Client` implementing `Querier` over
+`github.com/prometheus/client_golang/api/prometheus/v1` (the module is already a
+dependency via `commons`). Tested against an `httptest` server.
+
+Snapshot contents — this is the "all available metrics" list:
+
+| Section | Field | Source |
+|---|---|---|
+| app | per provider: queued, sent, retried, failed, undecodable (increase over window) | `notify_fanout_deliveries_total`, `notify_deliveries_total{outcome}` |
+| app | in transit = queued − sent − failed | same two |
+| app | backlog ready / unacked per provider (now + series) | `rabbitmq_detailed_queue_messages_ready`, `…_unacked` |
+| app | queued rate and outcome rate per provider (series) | `rate()` of the counters |
+| app | breaker open per provider | `max by (provider) (notify_breaker_open)` |
+| system | provider latency p50/p95/p99 per provider (series) | `histogram_quantile` on `notify_provider_request_seconds_bucket` |
+| system | sends in flight, queues subscribed per provider | `notify_sends_in_flight`, `notify_queues_subscribed` |
+| system | fan-out pages rate, rejected rate | `notify_fanout_pages_total`, `notify_fanout_rejected_total` |
+| system | retry tiers and dead-letter depth | `rabbitmq_detailed_queue_messages_ready{queue=~"notify\\.(retry\\..+|dead)"}` |
+| system | targets up/down (api, each worker, rabbitmq) | `up` |
+| system | per target: goroutines, RSS, CPU | `go_goroutines`, `process_resident_memory_bytes`, `rate(process_cpu_seconds_total)` |
+
+Wiring (existing files):
+
+- `internal/httpapi/metrics.go` (new) — `func (s *server) metrics(w, r, appID)`; parses
+  `range`, calls `s.insight.Snapshot`, `writeJSON`. Invalid range → `audience.ErrInvalid`.
+- `internal/httpapi/router.go` — `NewRouter` takes `*insight.Service`; add
+  `r.Method(http.MethodGet, "/metrics", appHandler(s.metrics))` inside the `/v1` group.
+- `internal/httpapi/respond.go` — map `insight.ErrUnavailable` (Prometheus unreachable or
+  not configured) to `503 unavailable`.
+- `internal/httpapi/router_test.go` — extend `startTestAPI`/`mocks` with the querier mock;
+  add `metrics_test.go` (401 without token, 400 bad range, 200 shape, 503).
+- `cmd/server/config.go` — `PrometheusURL string \`env:"PROMETHEUS_URL"\`` (optional; empty
+  ⇒ the route answers 503). `config_test.go` updated.
+- `cmd/server/dependencies.go` — build `prom.Client` + `insight.Service`, pass to router.
+- `api/.env` — `PROMETHEUS_URL=http://prometheus:9090`.
+
+Go code follows the `google-go-style` skill (loaded before writing Go).
+
+## 2. Frontend (`notification-system/web`, new)
+
+Stack: **Vite + React 19 + TypeScript**, **Tailwind v4** (`@tailwindcss/vite`),
+**shadcn/ui** (components vendored into `src/components/ui`, neutral theme, light/dark via
+`prefers-color-scheme`), **TanStack Query** (server state, polling), **React Router**
+(library mode), **Recharts** through shadcn's `chart` component, `lucide-react`, `sonner`.
+No form or state library: forms are a handful of controlled inputs. **Vitest** for the
+logic below. The `frontend-design` and `dataviz` skills are loaded before writing UI/charts.
+
+```
+web/
+  Dockerfile  nginx.conf  .dockerignore
+  package.json  vite.config.ts  tsconfig*.json  components.json  index.html
+  src/
+    main.tsx  App.tsx (routes)  index.css
+    lib/api.ts          typed fetch client: bearer header, {error:{code,message}} → ApiError,
+                        401 → logout; one function per endpoint; types mirror the Go JSON
+    lib/auth.tsx        AuthProvider: token in localStorage, app_id decoded from the JWT `sub`
+    lib/pagination.ts   useInfiniteQuery helper over {items, next_after}
+    lib/format.ts       numbers, rates, durations, bytes
+    components/ui/*     shadcn: button input label textarea select tabs dialog table badge
+                        card dropdown-menu skeleton sonner chart
+    components/         AppShell (sidebar + app id + logout), DataTable, ConfirmDialog,
+                        IdListInput (paste/type user IDs as chips), StatTile, TimeSeriesPanel
+    pages/
+      Login.tsx              tabs: "Use a token" | "Create an app"
+      Users.tsx              table + load more, register user, delete
+      UserDetail.tsx         endpoints: list, add (channel → allowed providers), delete
+      Lists.tsx              table, create (name, description), delete
+      ListDetail.tsx         members: list, add many (IdListInput), remove
+      Notifications.tsx      send form + jobs table
+      Dashboard.tsx          range picker, 5s auto-refresh, "Your app" and "System" sections
+```
+
+Behaviour worth pinning down:
+
+- **Login** — a pasted token is checked with `GET /v1/users?limit=1`; 401 shows an inline
+  error. "Create an app" posts `{name}` with `X-Admin-Key`; the key is never stored. The
+  new token is shown once with a copy button before continuing. Any later 401 logs out.
+- **Send notification** — audience = an optional list (select fed by `GET /v1/lists`) plus
+  optional user IDs (max 1000, the API's limit), at least one; priority normal/high;
+  title; body. An `Idempotency-Key` (`crypto.randomUUID()`) is generated when the form
+  opens and renewed after a success, so a double click cannot send twice.
+- **Jobs table** — newest first on screen (the API returns oldest first; pages are loaded
+  and reversed), refetched every 2s while any job is not `dispatched`.
+- **Dashboard** — *Your app*: stat tiles (queued, sent, failed, in transit, backlog) with
+  an "open breaker" badge per provider, then panels for delivery outcome rate, queued rate
+  and backlog per provider. *System*: target health row, provider latency p50/p95/p99,
+  sends in flight, fan-out pages/rejections, retry-tier and dead-letter depth, runtime
+  table. A 503 from `/v1/metrics` renders an "metrics unavailable" state, not an error page.
+
+Tests (Vitest): `api.ts` (auth header, error mapping, 401 logout), JWT `sub` decoding,
+`IdListInput` parsing/dedup, `format.ts`.
+
+## 3. Running it
+
+- `web/Dockerfile` — `node:22-alpine` builds (`npm ci && npm run build`), `nginx:alpine`
+  serves `dist` with SPA fallback and `location /v1/ { proxy_pass http://api:8080; }`.
+- `compose.yaml` — new `web` service (`build: ./web`, `3000:80`, depends on `api`).
+- `vite.config.ts` — dev proxy `/v1` → `http://localhost:8080`.
+- `notification-system/README.md` — a "Console" section (URL, login, dev loop through
+  Docker), the `/v1/metrics` route, `web/` in the path table, `PROMETHEUS_URL`.
+- `deploy/k8s` is left alone (no web Deployment); the README says so.
+
+## Order of work
+
+1. Write the spec to `docs/superpowers/specs/2026-10-06-web-console-design.md` (the repo's
+   convention; content = this plan). Per the saved preference, no separate plan document.
+2. Backend, test-first: `insight` → `prom` → `httpapi` route → config/dependencies/.env.
+3. Scaffold `web/` (config files by hand; `npm install` and `npx shadcn add …` in a
+   `node:22-alpine` container to produce the lockfile and vendored components).
+4. `api.ts`, auth, shell, login → users/endpoints → lists/members → notifications →
+   dashboard.
+5. Dockerfile, nginx, compose, README.
+
+## Verification
+
+- `cd notification-system/api && go generate ./... && go vet ./... && go test ./...`
+  (with `DATABASE_URL`/`AMQP_URL` set as in the README so nothing is skipped).
+- `docker run --rm -v <web>:/app -w /app node:22-alpine sh -c "npm ci && npm run lint && npx tsc -b && npm test -- --run && npm run build"`.
+- `docker compose up --build`, then in Chrome (claude-in-chrome) at `localhost:3000`:
+  create an app with `dev-admin-key`; log out and back in by pasting the token; a bad
+  token is refused; register users, add one endpoint per provider; create a list and add
+  members; send one notification to the list and one to user IDs; watch the job reach
+  `dispatched` and the dashboard tiles/series move.
+- `curl localhost:8080/v1/metrics` without a token → 401; with a second app's token the
+  per-app numbers are that app's own.
+- `THROTTLE_RATE=0.9 docker compose up -d mockprovider` → breaker badge, retry-tier depth
+  and `retried` rate show up; `docker compose stop prometheus` → dashboard shows the
+  unavailable state while the rest of the console keeps working.
+
+## As built
+
+Where the implementation departed from the plan above:
+
+- shadcn's current default style is built on Base UI rather than Radix, so that is what
+  `components/ui` is; `dropdown-menu` was not needed.
+- The helpers ended up as `lib/pages.ts` (pagination) and `lib/ids.ts` (parsing user IDs),
+  the user ID box as `components/UserIDsField.tsx`, and the small shared pieces in
+  `components/common.tsx`. The stat tiles became the first table of the dashboard, the
+  delivery pipeline, which shows the same numbers per provider with a total.
+- The retry tiers and the dead-letter queue are shown as their depth now, not over time,
+  so the snapshot has no series for them.
+- Counts over the window are not a bare `increase()`: a counter that first appears inside
+  the window is taken at its value, or an app's first deliveries would not be counted. See
+  `growth` in `api/internal/insight/service.go`.

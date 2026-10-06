@@ -18,6 +18,9 @@ type config struct {
 	MetricsAddr string `env:"METRICS_ADDR" envDefault:":9090"`
 	// OTLPEndpoint is where traces are exported. Empty exports none.
 	OTLPEndpoint string `env:"OTEL_EXPORTER_OTLP_ENDPOINT"`
+	// PrometheusURL is the base URL of the Prometheus that scrapes the services, which
+	// GET /v1/metrics reads from. Empty makes that route answer 503.
+	PrometheusURL string `env:"PROMETHEUS_URL"`
 }
 
 // parseConfig reads the config from environ, which maps variable names to values.

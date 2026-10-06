@@ -9,6 +9,7 @@ import (
 	"strconv"
 
 	"github.com/francobatta/iol-challenge/notification-system/api/internal/audience"
+	"github.com/francobatta/iol-challenge/notification-system/api/internal/insight"
 	"github.com/francobatta/iol-challenge/notification-system/api/internal/notify"
 )
 
@@ -61,6 +62,10 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 		status, code, message = http.StatusConflict, "conflict", err.Error()
 	case errors.Is(err, notify.ErrQuotaExceeded):
 		status, code, message = http.StatusTooManyRequests, "quota_exceeded", err.Error()
+	case errors.Is(err, insight.ErrUnavailable):
+		// Logged too: it is the operator who can do something about it.
+		slog.WarnContext(r.Context(), "Metrics unavailable", "err", err)
+		status, code, message = http.StatusServiceUnavailable, "unavailable", "metrics are unavailable"
 	default:
 		slog.ErrorContext(r.Context(), "Request failed", "method", r.Method, "path", r.URL.Path, "err", err)
 	}

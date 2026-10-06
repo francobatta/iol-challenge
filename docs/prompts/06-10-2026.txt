@@ -34,3 +34,23 @@ Now let's tackle the countResults (aggregator) concern. We have a results queue 
 ***
 Commit and push everything to main
 ***
+Let's add a simple frontend for this system. Create a very simple frontend using react, shadcn, minimalistic style
+  dependencies using opinionated and proven stuff like vite.
+
+  The frontend must be able to:
+  * Log in as an app and use its JWT (api key) extensively
+  * Create, see users and lists of users
+  * Create a notification choosing a list of users, or individual user IDs
+  * A metrics and status dashboard which uses all of the available metrics. The dashboard may be grafana,
+  grafana-inspired or with a small bff coded aside to consume the metrics efficiently.
+***
+Add a minimal section with docs using https://github.com/redocly/redoc - openapi.
+
+  The sections should be:
+  * a brief description of the system, aimed at being didactic
+  * a "0 to 1" from creating an app to sending your first notification
+  * an "examples section" with subsections. Each subsection is an example to use the system. Each subsection has
+  curls to paste and execute. Write examples of different use cases (send notification to list, create list, etc).
+  Be BRIEF and simple
+
+   Auth does not matter for this section as it is more teaching-oriented

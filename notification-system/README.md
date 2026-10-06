@@ -22,6 +22,8 @@ client -> api -> Postgres (job + fan-out)            api/cmd/server
 
 Prometheus <- api, workers, RabbitMQ                 what was queued, sent and failed,
                                                      and what is waiting, per app and provider
+
+browser -> web (nginx) -> api -> Prometheus          the console: web/
 ```
 
 Accepting a notification is one `INSERT`: the job, and with it a row in `fanouts` that
@@ -42,8 +44,9 @@ described under [Following deliveries](#following-deliveries).
 | `api/` | Go module: the REST API, with the goroutines that dispatch what it accepts |
 | `worker/` | Go module: the worker and the mock provider. No database access |
 | `commons/` | Go module both import: the RabbitMQ topology, the messages, the provider names, tracing and metrics, and the HTTP server loop |
+| `web/` | The console: a React app for an app's owner, with the dashboard. See [Console](#console) |
 | `api/.env`, `worker/.env` | Configuration of the services in each module |
-| `compose.yaml` | Everything on one machine, one worker per provider, with a Prometheus |
+| `compose.yaml` | Everything on one machine, one worker per provider, with a Prometheus and the console |
 | `deploy/k8s/` | Deployments, a Service, and KEDA `ScaledObject`s for the worker pools |
 | `deploy/prometheus/` | What the Prometheus of compose scrapes |
 
@@ -62,8 +65,8 @@ Below that the layers are always the same, and each only calls the one under it:
 | Layer | API module | Worker module |
 |---|---|---|
 | Transport | `internal/httpapi`: the [chi](https://github.com/go-chi/chi) router and its handlers | `internal/consume`: the pool that takes deliveries off the queues |
-| Service | `internal/audience`, `internal/notify`, `internal/dispatch` | `internal/consume`: the handler that sends one delivery |
-| Repository and clients | `internal/postgres`, `internal/broker` | `internal/provider`, the publisher in `internal/consume` |
+| Service | `internal/audience`, `internal/notify`, `internal/dispatch`, `internal/insight` | `internal/consume`: the handler that sends one delivery |
+| Repository and clients | `internal/postgres`, `internal/broker`, `internal/prom` | `internal/provider`, the publisher in `internal/consume` |
 
 A service declares the `Repository` interface it needs next to itself, and
 `postgres.Repository` implements all of them.
@@ -74,8 +77,10 @@ A service declares the `Repository` interface it needs next to itself, and
 docker compose up --build
 ```
 
-The API is on `localhost:8080`, RabbitMQ's management UI on `localhost:15672`
-(`notify` / `notify`), and Prometheus on `localhost:9090`.
+The console is on `localhost:3000`, the API on `localhost:8080`, RabbitMQ's management UI on
+`localhost:15672` (`notify` / `notify`), and Prometheus on `localhost:9090`.
+
+Everything below can also be done in the [console](#console).
 
 ```sh
 # Create an app. The answer has its token.
@@ -133,8 +138,7 @@ sum by (app_id, provider) (notify_fanout_deliveries_total)
 sum by (app_id, provider) (rabbitmq_detailed_queue_messages_ready)
 ```
 
-A page that shows this to an app's owner would run these queries, filtered by `app_id`,
-next to `GET /v1/notifications`.
+The console's dashboard shows these, filtered by `app_id`: see [Console](#console).
 
 ### Configuration
 
@@ -173,6 +177,46 @@ What to look for:
 - `docker compose kill worker-twilio` in the middle of a job loses nothing: the deliveries the
   worker held return to their queue. Start it again with `docker compose up -d worker-twilio`.
 
+## Console
+
+`web/` is a small React app for an app's owner, served by compose on `localhost:3000`:
+
+| Page | What |
+|---|---|
+| Sign in | Paste an app's token, or create an app with the admin key (`dev-admin-key`) and sign in with the token that comes back |
+| Dashboard | What became of the app's deliveries per provider, and the state of the system: every metric in the table under [Following deliveries](#following-deliveries) and the processes behind them |
+| Users | Register and delete users, and manage the endpoints that reach each one |
+| Lists | Create and delete lists, add and remove their members |
+| Notifications | Send to a list, to individual users or both, and watch the jobs get dispatched |
+| API docs | A guide and the reference of every route, drawn by [Redoc](https://github.com/Redocly/redoc) from `web/public/openapi.yaml`. At `localhost:3000/docs`, without signing in |
+
+The token is the only credential: it is kept in the browser's local storage and sent as the
+bearer token of every request, and a 401 from the API signs the app out.
+
+The browser talks to one origin. nginx serves the built files and passes `/v1` on to the
+API (`web/nginx.conf`), so the API needs no CORS.
+
+The dashboard never talks to Prometheus, which has no authentication and would show every
+app's series. It asks the API for `GET /v1/metrics?range=15m` (from `1m` to `24h`), which
+runs a fixed set of PromQL queries against `PROMETHEUS_URL`, restricted to the `app_id` of
+the token, and answers with one snapshot: see `api/internal/insight`. Without Prometheus
+that route answers 503 and the rest of the console keeps working. The system half of the
+dashboard (processes, worker pools, retry queues, provider latency) is the same for every
+app.
+
+It is built with Vite, React, TypeScript, Tailwind and shadcn/ui, with TanStack Query for
+the calls and Recharts for the charts. To work on it without Node installed:
+
+```sh
+docker compose up -d   # the API on localhost:8080
+docker run --rm -it -p 5173:5173 -v "$PWD/web:/app" -v /app/node_modules -w /app \
+  -e API_URL=http://host.docker.internal:8080 node:22-alpine \
+  sh -c "npm ci && npm run dev -- --port 5173"
+```
+
+With Node, `npm ci && npm run dev` in `web/` does the same; `npm test`, `npm run lint` and
+`npm run build` are the checks. `deploy/k8s` has no manifest for the console yet.
+
 ## Tests
 
 ```sh
@@ -181,6 +225,7 @@ cd api    && DATABASE_URL=postgres://audience:audience@localhost:5432/audience \
              AMQP_URL=amqp://notify:notify@localhost:5672/ go test ./...
 cd worker  && go test ./...
 cd commons && go test ./...
+cd web     && npm test -- --run          # or in a node:22-alpine container, as under Console
 ```
 
 Without the two variables the tests that need Postgres or RabbitMQ are skipped. The

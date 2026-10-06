@@ -14,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/francobatta/iol-challenge/notification-system/api/internal/audience"
+	"github.com/francobatta/iol-challenge/notification-system/api/internal/insight"
 	"github.com/francobatta/iol-challenge/notification-system/api/internal/notify"
 	"github.com/francobatta/iol-challenge/notification-system/api/internal/token"
 )
@@ -21,6 +22,7 @@ import (
 type server struct {
 	audiences     *audience.Service
 	notifications *notify.Service
+	insights      *insight.Service
 	tokens        *token.Signer
 	adminKey      string
 }
@@ -28,8 +30,8 @@ type server struct {
 // NewRouter returns the handler for the whole API. Requests to create an app must
 // carry adminKey in the X-Admin-Key header; all other requests must carry a token
 // issued by tokens.
-func NewRouter(audiences *audience.Service, notifications *notify.Service, tokens *token.Signer, adminKey string) http.Handler {
-	s := &server{audiences: audiences, notifications: notifications, tokens: tokens, adminKey: adminKey}
+func NewRouter(audiences *audience.Service, notifications *notify.Service, insights *insight.Service, tokens *token.Signer, adminKey string) http.Handler {
+	s := &server{audiences: audiences, notifications: notifications, insights: insights, tokens: tokens, adminKey: adminKey}
 
 	r := chi.NewRouter()
 	r.With(s.requireAdmin).Method(http.MethodPost, "/v1/apps", handler(s.createApp))
@@ -72,6 +74,8 @@ func NewRouter(audiences *audience.Service, notifications *notify.Service, token
 			r.Method(http.MethodGet, "/", appHandler(s.notificationJobs))
 			r.Method(http.MethodGet, "/{job_id}", appHandler(s.notificationJob))
 		})
+
+		r.Method(http.MethodGet, "/metrics", appHandler(s.metrics))
 	})
 	return r
 }

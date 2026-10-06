@@ -1,0 +1,792 @@
+openapi: 3.0.3
+info:
+  title: Notification system
+  version: "1.0"
+  description: |
+    # How it works
+
+    The system lets an **app** notify its **users** through Twilio (SMS), Mailchimp
+    (email), APNs and FCM (push). Five ideas are enough to use it:
+
+    | Idea | What it is |
+    |---|---|
+    | App | A client of the system. Everything below belongs to one app, and its token says which |
+    | User | Someone the app can notify. The app chooses the ID, usually the one it already has |
+    | Endpoint | One way to reach a user: a phone number, an email address or a device token, with the provider that delivers to it |
+    | List | A named group of users, to notify many at once |
+    | Notification | A message for some users, a list, or both |
+
+    Sending a notification does not deliver it on the spot. The API records a **job** and
+    answers at once. In the background the job is *dispatched*: it becomes one
+    **delivery** per endpoint of every user it names, and each delivery waits in a queue
+    until a worker hands it to its provider.
+
+    ```
+    notification -> job -> one delivery per endpoint -> queue -> worker -> provider
+    ```
+
+    So a job tells you how far the dispatch got (`pending`, `dispatching`, `dispatched`)
+    and how many deliveries it came to. What became of the deliveries (sent, retried,
+    failed) is counted per provider and shown on the console's dashboard.
+
+    A delivery that fails is retried after 5 seconds, 30 seconds, 2 minutes and 10
+    minutes before it is given up on. Delivery is at least once: after a crash a message
+    can arrive twice.
+
+    # From 0 to 1
+
+    From nothing to your first notification, with the system running on your machine
+    (`docker compose up --build`). Paste the commands in order.
+
+    **1. Create an app.** The answer has its token, which is not shown again. This is the
+    only call that takes the admin key instead of a token.
+
+    ```sh
+    curl -s -X POST localhost:8080/v1/apps \
+      -H 'X-Admin-Key: dev-admin-key' \
+      -d '{"name": "my-first-app"}'
+    ```
+
+    **2. Keep the token.** Every other command on this page uses it.
+
+    ```sh
+    TOKEN=paste-the-token-here
+    ```
+
+    **3. Register a user.**
+
+    ```sh
+    curl -s -X PUT localhost:8080/v1/users/ana \
+      -H "Authorization: Bearer $TOKEN"
+    ```
+
+    **4. Give the user an endpoint.** Without one, a notification to them reaches nobody.
+
+    ```sh
+    curl -s -X POST localhost:8080/v1/users/ana/endpoints \
+      -H "Authorization: Bearer $TOKEN" \
+      -d '{"address": "ana@example.com", "channel": "email", "provider": "mailchimp"}'
+    ```
+
+    **5. Send the notification.** The answer is the job, with its `job_id`.
+
+    ```sh
+    curl -s -X POST localhost:8080/v1/notifications \
+      -H "Authorization: Bearer $TOKEN" \
+      -d '{"user_ids": ["ana"], "content": {"title": "Welcome", "body": "Hello, Ana"}}'
+    ```
+
+    **6. See how far it got.** Within a second or two the job is `dispatched` and
+    `queued` is 1: one delivery, for the one endpoint.
+
+    ```sh
+    curl -s localhost:8080/v1/notifications \
+      -H "Authorization: Bearer $TOKEN"
+    ```
+
+    # Examples
+
+    Each example stands on its own, given the `TOKEN` and the user `ana` from above.
+
+    ## Reach a user on every channel
+
+    One endpoint per way of reaching them. The channel decides the provider: `sms` is
+    `twilio`, `email` is `mailchimp`, and `push` is `apns` or `fcm`.
+
+    ```sh
+    curl -s -X POST localhost:8080/v1/users/ana/endpoints -H "Authorization: Bearer $TOKEN" \
+      -d '{"address": "+5491100000000", "channel": "sms", "provider": "twilio"}'
+    curl -s -X POST localhost:8080/v1/users/ana/endpoints -H "Authorization: Bearer $TOKEN" \
+      -d '{"address": "ios-device-token", "channel": "push", "provider": "apns"}'
+    curl -s -X POST localhost:8080/v1/users/ana/endpoints -H "Authorization: Bearer $TOKEN" \
+      -d '{"address": "android-device-token", "channel": "push", "provider": "fcm"}'
+    ```
+
+    A notification to `ana` now becomes four deliveries.
+
+    ## Register more users
+
+    ```sh
+    for user in bob carla; do
+      curl -s -X PUT localhost:8080/v1/users/$user -H "Authorization: Bearer $TOKEN"
+      curl -s -X POST localhost:8080/v1/users/$user/endpoints -H "Authorization: Bearer $TOKEN" \
+        -d "{\"address\": \"$user@example.com\", \"channel\": \"email\", \"provider\": \"mailchimp\"}"
+    done
+    ```
+
+    ## Create a list
+
+    The answer has the `list_id` the next examples need.
+
+    ```sh
+    curl -s -X POST localhost:8080/v1/lists \
+      -H "Authorization: Bearer $TOKEN" \
+      -d '{"name": "beta-testers", "description": "People trying the new release"}'
+
+    LIST=paste-the-list_id-here
+    ```
+
+    ## Add users to a list
+
+    All of them are added, or none if one is not a registered user.
+
+    ```sh
+    curl -s -X POST localhost:8080/v1/lists/$LIST/members \
+      -H "Authorization: Bearer $TOKEN" \
+      -d '{"user_ids": ["ana", "bob", "carla"]}'
+
+    curl -s localhost:8080/v1/lists/$LIST/members -H "Authorization: Bearer $TOKEN"
+    ```
+
+    ## Send a notification to a list
+
+    It goes to everyone on the list at that moment.
+
+    ```sh
+    curl -s -X POST localhost:8080/v1/notifications \
+      -H "Authorization: Bearer $TOKEN" \
+      -d "{\"list_id\": \"$LIST\", \"content\": {\"title\": \"Beta 2\", \"body\": \"A new build is out\"}}"
+    ```
+
+    ## Send a notification to a few users
+
+    Up to 1,000 user IDs. `list_id` and `user_ids` can go together; someone reached both
+    ways is still notified once per endpoint.
+
+    ```sh
+    curl -s -X POST localhost:8080/v1/notifications \
+      -H "Authorization: Bearer $TOKEN" \
+      -d '{"user_ids": ["ana", "bob"], "content": {"body": "Your order has shipped"}}'
+    ```
+
+    ## Send something urgent
+
+    `high` goes ahead of your app's own `normal` deliveries. It never overtakes another
+    app's.
+
+    ```sh
+    curl -s -X POST localhost:8080/v1/notifications \
+      -H "Authorization: Bearer $TOKEN" \
+      -d '{"user_ids": ["ana"], "priority": "high", "content": {"body": "Your code is 4821"}}'
+    ```
+
+    ## Send without risking a duplicate
+
+    If a request times out you cannot tell whether it arrived. Send it with an
+    `Idempotency-Key` and repeat it freely: the second time answers `200` with the job
+    the first one created, instead of `202` with a new one.
+
+    ```sh
+    for attempt in 1 2; do
+      curl -s -o /dev/null -w "%{http_code}\n" -X POST localhost:8080/v1/notifications \
+        -H "Authorization: Bearer $TOKEN" \
+        -H 'Idempotency-Key: order-1234-shipped' \
+        -d '{"user_ids": ["ana"], "content": {"body": "Your order has shipped"}}'
+    done
+    ```
+
+    ## Follow a job
+
+    ```sh
+    JOB=paste-a-job_id-here
+    curl -s localhost:8080/v1/notifications/$JOB -H "Authorization: Bearer $TOKEN"
+    ```
+
+    ## Read a long collection page by page
+
+    Collections answer with `items` and, when there is more, `next_after`. Pass it back
+    as `after` to get the next page.
+
+    ```sh
+    curl -s "localhost:8080/v1/users?limit=2" -H "Authorization: Bearer $TOKEN"
+    curl -s "localhost:8080/v1/users?limit=2&after=bob" -H "Authorization: Bearer $TOKEN"
+    ```
+
+    ## Stop notifying someone
+
+    Take them off a list, or delete them, which also deletes their endpoints and
+    memberships.
+
+    ```sh
+    curl -s -X DELETE localhost:8080/v1/lists/$LIST/members/carla -H "Authorization: Bearer $TOKEN"
+    curl -s -X DELETE localhost:8080/v1/users/carla -H "Authorization: Bearer $TOKEN"
+    ```
+
+servers:
+  - url: http://localhost:8080
+    description: The API, as compose runs it
+
+tags:
+  - name: Apps
+  - name: Users
+  - name: Endpoints
+  - name: Lists
+  - name: Notifications
+  - name: Metrics
+
+security:
+  - appToken: []
+
+paths:
+  /v1/apps:
+    post:
+      tags: [Apps]
+      summary: Create an app
+      description: The only route that takes the admin key. The token in the answer is not shown again.
+      security:
+        - adminKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, example: my-first-app }
+      responses:
+        "201":
+          description: The app, with its token.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  app_id: { type: string, format: uuid }
+                  name: { type: string }
+                  created_at: { type: string, format: date-time }
+                  token: { type: string, description: Sent as the bearer token of every other request. }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/users:
+    get:
+      tags: [Users]
+      summary: List users
+      parameters:
+        - $ref: "#/components/parameters/after"
+        - $ref: "#/components/parameters/limit"
+      responses:
+        "200":
+          description: A page of users, ordered by ID.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/User" } }
+                  next_after: { $ref: "#/components/schemas/NextAfter" }
+
+  /v1/users/{user_id}:
+    parameters:
+      - $ref: "#/components/parameters/user_id"
+    put:
+      tags: [Users]
+      summary: Register a user
+      description: Safe to repeat. Answers 201 if the user is new and 200 if it already existed.
+      responses:
+        "200": { description: The user already existed., content: { application/json: { schema: { $ref: "#/components/schemas/User" } } } }
+        "201": { description: The user was registered., content: { application/json: { schema: { $ref: "#/components/schemas/User" } } } }
+        "400": { $ref: "#/components/responses/Invalid" }
+    get:
+      tags: [Users]
+      summary: Get a user
+      responses:
+        "200": { description: The user., content: { application/json: { schema: { $ref: "#/components/schemas/User" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Users]
+      summary: Delete a user
+      description: Also deletes the user's endpoints and list memberships.
+      responses:
+        "204": { description: Deleted. }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/users/{user_id}/endpoints:
+    parameters:
+      - $ref: "#/components/parameters/user_id"
+    post:
+      tags: [Endpoints]
+      summary: Add an endpoint to a user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NewEndpoint" }
+      responses:
+        "201": { description: The endpoint., content: { application/json: { schema: { $ref: "#/components/schemas/Endpoint" } } } }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    get:
+      tags: [Endpoints]
+      summary: List a user's endpoints
+      parameters:
+        - $ref: "#/components/parameters/after"
+        - $ref: "#/components/parameters/limit"
+      responses:
+        "200":
+          description: A page of endpoints.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Endpoint" } }
+                  next_after: { $ref: "#/components/schemas/NextAfter" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/endpoints/{endpoint_id}:
+    parameters:
+      - name: endpoint_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [Endpoints]
+      summary: Get an endpoint
+      responses:
+        "200": { description: The endpoint., content: { application/json: { schema: { $ref: "#/components/schemas/Endpoint" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Endpoints]
+      summary: Change an endpoint
+      description: Only the fields sent are changed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                address: { type: string }
+                channel: { $ref: "#/components/schemas/Channel" }
+                provider: { $ref: "#/components/schemas/Provider" }
+      responses:
+        "200": { description: The endpoint as it is now., content: { application/json: { schema: { $ref: "#/components/schemas/Endpoint" } } } }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      tags: [Endpoints]
+      summary: Delete an endpoint
+      responses:
+        "204": { description: Deleted. }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/lists:
+    post:
+      tags: [Lists]
+      summary: Create a list
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, example: beta-testers }
+                description: { type: string }
+      responses:
+        "201": { description: The list., content: { application/json: { schema: { $ref: "#/components/schemas/List" } } } }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    get:
+      tags: [Lists]
+      summary: List the lists
+      parameters:
+        - $ref: "#/components/parameters/after"
+        - $ref: "#/components/parameters/limit"
+      responses:
+        "200":
+          description: A page of lists.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/List" } }
+                  next_after: { $ref: "#/components/schemas/NextAfter" }
+
+  /v1/lists/{list_id}:
+    parameters:
+      - $ref: "#/components/parameters/list_id"
+    get:
+      tags: [Lists]
+      summary: Get a list
+      responses:
+        "200": { description: The list., content: { application/json: { schema: { $ref: "#/components/schemas/List" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Lists]
+      summary: Rename or describe a list
+      description: Only the fields sent are changed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                description: { type: string }
+      responses:
+        "200": { description: The list as it is now., content: { application/json: { schema: { $ref: "#/components/schemas/List" } } } }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      tags: [Lists]
+      summary: Delete a list
+      description: Its members stay registered as users.
+      responses:
+        "204": { description: Deleted. }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/lists/{list_id}/members:
+    parameters:
+      - $ref: "#/components/parameters/list_id"
+    post:
+      tags: [Lists]
+      summary: Add users to a list
+      description: Adds all of them or none. Users already on the list are left as they are.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_ids]
+              properties:
+                user_ids:
+                  type: array
+                  minItems: 1
+                  maxItems: 1000
+                  items: { type: string }
+                  example: [ana, bob]
+      responses:
+        "204": { description: Added. }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    get:
+      tags: [Lists]
+      summary: List the members of a list
+      parameters:
+        - $ref: "#/components/parameters/after"
+        - $ref: "#/components/parameters/limit"
+      responses:
+        "200":
+          description: A page of members, ordered by user ID.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        user_id: { type: string }
+                        added_at: { type: string, format: date-time }
+                  next_after: { $ref: "#/components/schemas/NextAfter" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/lists/{list_id}/members/{user_id}:
+    parameters:
+      - $ref: "#/components/parameters/list_id"
+      - $ref: "#/components/parameters/user_id"
+    put:
+      tags: [Lists]
+      summary: Add one user to a list
+      responses:
+        "204": { description: Added. }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Lists]
+      summary: Remove a user from a list
+      description: Does nothing if the user is not on it.
+      responses:
+        "204": { description: Removed. }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/notifications:
+    post:
+      tags: [Notifications]
+      summary: Send a notification
+      description: |
+        Records a job and answers at once; delivery happens afterwards. At least one of
+        `user_ids` and `list_id` is required.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          description: Makes a repeated request answer with the job the first one created.
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                user_ids:
+                  type: array
+                  maxItems: 1000
+                  items: { type: string }
+                  example: [ana]
+                list_id: { type: string, format: uuid }
+                priority: { $ref: "#/components/schemas/Priority" }
+                content:
+                  type: object
+                  required: [body]
+                  properties:
+                    title: { type: string, example: Welcome }
+                    body: { type: string, example: "Hello, Ana" }
+      responses:
+        "202": { description: Accepted. The job this request created., content: { application/json: { schema: { $ref: "#/components/schemas/Job" } } } }
+        "200": { description: "The idempotency key had been used. The job the first request created, as it is now.", content: { application/json: { schema: { $ref: "#/components/schemas/Job" } } } }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429":
+          description: The app has queued all the deliveries it may today.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    get:
+      tags: [Notifications]
+      summary: List jobs
+      description: Oldest first.
+      parameters:
+        - $ref: "#/components/parameters/after"
+        - $ref: "#/components/parameters/limit"
+      responses:
+        "200":
+          description: A page of jobs.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Job" } }
+                  next_after: { $ref: "#/components/schemas/NextAfter" }
+
+  /v1/notifications/{job_id}:
+    get:
+      tags: [Notifications]
+      summary: Get a job
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: The job., content: { application/json: { schema: { $ref: "#/components/schemas/Job" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/metrics:
+    get:
+      tags: [Metrics]
+      summary: Get a snapshot of the metrics
+      description: |
+        What became of the app's deliveries per provider, and the state of the system,
+        over the window that ends now. It is what the console's dashboard draws.
+      parameters:
+        - name: range
+          in: query
+          description: How far back to look, from `1m` to `24h`.
+          schema: { type: string, default: 15m, example: 1h }
+      responses:
+        "200":
+          description: The snapshot.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Snapshot" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "503":
+          description: The metrics cannot be read just now.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+components:
+  securitySchemes:
+    appToken:
+      type: http
+      scheme: bearer
+      description: The token returned when the app was created.
+    adminKey:
+      type: apiKey
+      in: header
+      name: X-Admin-Key
+      description: Authorizes creating apps. `dev-admin-key` in local development.
+
+  parameters:
+    user_id:
+      name: user_id
+      in: path
+      required: true
+      schema: { type: string, example: ana }
+    list_id:
+      name: list_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    after:
+      name: after
+      in: query
+      description: Return the items after this ID. Take it from `next_after` of the page before.
+      schema: { type: string }
+    limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+
+  responses:
+    Invalid:
+      description: The request breaks a rule; the message says which.
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    Unauthorized:
+      description: The credentials are missing or wrong.
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    NotFound:
+      description: It does not exist in this app.
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    Conflict:
+      description: The name or the address is already taken.
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              enum: [invalid_request, unauthorized, not_found, conflict, quota_exceeded, unavailable, internal]
+            message: { type: string }
+    NextAfter:
+      type: string
+      description: Present when more items follow. Pass it as `after` to get them.
+    Channel:
+      type: string
+      enum: [sms, email, push]
+    Provider:
+      type: string
+      enum: [twilio, mailchimp, apns, fcm]
+      description: "`twilio` delivers `sms`, `mailchimp` delivers `email`, `apns` and `fcm` deliver `push`."
+    Priority:
+      type: string
+      enum: [normal, high]
+      default: normal
+    User:
+      type: object
+      properties:
+        user_id: { type: string, example: ana }
+        created_at: { type: string, format: date-time }
+    NewEndpoint:
+      type: object
+      required: [address, channel, provider]
+      properties:
+        address: { type: string, example: ana@example.com, description: "A phone number, an email address or a device token." }
+        channel: { $ref: "#/components/schemas/Channel" }
+        provider: { $ref: "#/components/schemas/Provider" }
+    Endpoint:
+      allOf:
+        - type: object
+          properties:
+            endpoint_id: { type: string, format: uuid }
+            user_id: { type: string }
+        - $ref: "#/components/schemas/NewEndpoint"
+    List:
+      type: object
+      properties:
+        list_id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string }
+        created_at: { type: string, format: date-time }
+    Job:
+      type: object
+      properties:
+        job_id: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [pending, dispatching, dispatched]
+          description: "`pending`: accepted. `dispatching`: being turned into deliveries. `dispatched`: every delivery is queued."
+        priority: { $ref: "#/components/schemas/Priority" }
+        queued: { type: integer, description: Deliveries queued so far. }
+        created_at: { type: string, format: date-time }
+    Series:
+      type: object
+      description: How one value changed over the window.
+      properties:
+        labels: { type: object, additionalProperties: { type: string } }
+        points:
+          type: array
+          description: Pairs of Unix seconds and value.
+          items: { type: array, items: { type: number }, minItems: 2, maxItems: 2 }
+    Snapshot:
+      type: object
+      properties:
+        at: { type: string, format: date-time }
+        window_seconds: { type: integer }
+        step_seconds: { type: integer }
+        app:
+          type: object
+          description: The deliveries of the app the token belongs to.
+          properties:
+            providers:
+              type: array
+              items:
+                type: object
+                properties:
+                  provider: { $ref: "#/components/schemas/Provider" }
+                  queued: { type: number, description: Over the window. }
+                  sent: { type: number, description: Over the window. }
+                  retried: { type: number, description: Over the window. }
+                  failed: { type: number, description: Over the window. }
+                  undecodable: { type: number, description: Over the window. }
+                  in_transit: { type: number, description: "Queued, ever, but neither sent nor failed." }
+                  ready: { type: number, description: Waiting for a worker now. }
+                  unacked: { type: number, description: Held by a worker now. }
+                  breaker_open: { type: boolean, description: Workers have paused the app on this provider after repeated failures. }
+            queued_rate: { type: array, items: { $ref: "#/components/schemas/Series" } }
+            outcome_rate: { type: array, items: { $ref: "#/components/schemas/Series" } }
+            backlog: { type: array, items: { $ref: "#/components/schemas/Series" } }
+        system:
+          type: object
+          description: The same for every app.
+          properties:
+            targets:
+              type: array
+              items:
+                type: object
+                properties:
+                  job: { type: string }
+                  instance: { type: string }
+                  up: { type: boolean }
+                  goroutines: { type: number }
+                  memory_bytes: { type: number }
+                  cpu: { type: number, description: Cores in use. }
+            pools:
+              type: array
+              items:
+                type: object
+                properties:
+                  provider: { $ref: "#/components/schemas/Provider" }
+                  workers: { type: number }
+                  sends_in_flight: { type: number }
+                  queues_subscribed: { type: number }
+            queues:
+              type: array
+              description: Depth of the retry tiers and the dead-letter queue.
+              items:
+                type: object
+                properties:
+                  labels: { type: object, additionalProperties: { type: string } }
+                  value: { type: number }
+            latency_p50: { type: array, items: { $ref: "#/components/schemas/Series" } }
+            latency_p95: { type: array, items: { $ref: "#/components/schemas/Series" } }
+            latency_p99: { type: array, items: { $ref: "#/components/schemas/Series" } }
+            sends_in_flight: { type: array, items: { $ref: "#/components/schemas/Series" } }
+            fanout_pages_rate: { type: array, items: { $ref: "#/components/schemas/Series" } }
+            fanout_rejected_rate: { type: array, items: { $ref: "#/components/schemas/Series" } }

@@ -13,8 +13,10 @@ import (
 	"github.com/francobatta/iol-challenge/notification-system/api/internal/broker"
 	"github.com/francobatta/iol-challenge/notification-system/api/internal/dispatch"
 	"github.com/francobatta/iol-challenge/notification-system/api/internal/httpapi"
+	"github.com/francobatta/iol-challenge/notification-system/api/internal/insight"
 	"github.com/francobatta/iol-challenge/notification-system/api/internal/notify"
 	"github.com/francobatta/iol-challenge/notification-system/api/internal/postgres"
+	"github.com/francobatta/iol-challenge/notification-system/api/internal/prom"
 	"github.com/francobatta/iol-challenge/notification-system/api/internal/token"
 	"github.com/francobatta/iol-challenge/notification-system/commons/telemetry"
 )
@@ -77,10 +79,27 @@ func newDependencies(ctx context.Context, cfg config) (_ *dependencies, err erro
 	audiences := audience.NewService(repo)
 	notifications := notify.NewService(repo)
 	d.fanout = dispatch.NewFanout(repo, d.mq, metrics, dispatch.DefaultPageSize, dispatch.DefaultLease)
+	insights, err := newInsights(cfg.PrometheusURL)
+	if err != nil {
+		return nil, err
+	}
 
 	// Transport.
-	d.router = httpapi.NewRouter(audiences, notifications, tokens, cfg.AdminKey)
+	d.router = httpapi.NewRouter(audiences, notifications, insights, tokens, cfg.AdminKey)
 	return d, nil
+}
+
+// newInsights returns the service that reads the metrics back from the Prometheus at
+// baseURL. Without one the service exists but has nothing to report.
+func newInsights(baseURL string) (*insight.Service, error) {
+	if baseURL == "" {
+		return insight.NewService(nil), nil
+	}
+	client, err := prom.NewClient(baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("PROMETHEUS_URL: %v", err)
+	}
+	return insight.NewService(client), nil
 }
 
 func (d *dependencies) close() {

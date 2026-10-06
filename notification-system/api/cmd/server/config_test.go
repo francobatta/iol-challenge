@@ -26,8 +26,8 @@ func TestParseConfig(t *testing.T) {
 		},
 		{
 			name: "everything set",
-			set:  map[string]string{"ADDR": ":9000", "METRICS_ADDR": ":9001", "OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318"},
-			want: config{DatabaseURL: "postgres://db", AMQPURL: "amqp://mq", JWTSecret: "secret", AdminKey: "key", Addr: ":9000", MetricsAddr: ":9001", OTLPEndpoint: "http://collector:4318"},
+			set:  map[string]string{"ADDR": ":9000", "METRICS_ADDR": ":9001", "OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318", "PROMETHEUS_URL": "http://prometheus:9090"},
+			want: config{DatabaseURL: "postgres://db", AMQPURL: "amqp://mq", JWTSecret: "secret", AdminKey: "key", Addr: ":9000", MetricsAddr: ":9001", OTLPEndpoint: "http://collector:4318", PrometheusURL: "http://prometheus:9090"},
 		},
 		{name: "no DATABASE_URL", set: map[string]string{"DATABASE_URL": ""}, wantErr: true},
 		{name: "no AMQP_URL", set: map[string]string{"AMQP_URL": ""}, wantErr: true},

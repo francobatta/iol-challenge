@@ -87,6 +87,14 @@ services:
       db:
         condition: service_healthy
 
+  # The console: the React app, and /v1 passed on to the api. See web/nginx.conf.
+  web:
+    build: ./web
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+
   # Stands in for Twilio, Mailchimp, APNs and FCM. Set ERROR_RATE or THROTTLE_RATE
   # (0 to 1) in the shell that runs compose to make it answer 500 or 429 that often;
   # that overrides worker/.env.

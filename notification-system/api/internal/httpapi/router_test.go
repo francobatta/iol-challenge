@@ -13,6 +13,8 @@ import (
 
 	"github.com/francobatta/iol-challenge/notification-system/api/internal/audience"
 	"github.com/francobatta/iol-challenge/notification-system/api/internal/audience/audiencetest"
+	"github.com/francobatta/iol-challenge/notification-system/api/internal/insight"
+	"github.com/francobatta/iol-challenge/notification-system/api/internal/insight/insighttest"
 	"github.com/francobatta/iol-challenge/notification-system/api/internal/notify"
 	"github.com/francobatta/iol-challenge/notification-system/api/internal/notify/notifytest"
 	"github.com/francobatta/iol-challenge/notification-system/api/internal/token"
@@ -71,6 +73,7 @@ func newTestAPI(t *testing.T) (client, *audiencetest.MockRepositoryMockRecorder)
 type mocks struct {
 	audience *audiencetest.MockRepositoryMockRecorder
 	jobs     *notifytest.MockRepositoryMockRecorder
+	prom     *insighttest.MockQuerierMockRecorder
 }
 
 // startTestAPI starts the API over mocks and returns a client holding a token for
@@ -86,10 +89,10 @@ func startTestAPI(t *testing.T) (client, mocks) {
 		t.Fatalf("Setup: Issue(%q) failed: %v", testAppID, err)
 	}
 	ctrl := gomock.NewController(t)
-	repo, jobs := audiencetest.NewMockRepository(ctrl), notifytest.NewMockRepository(ctrl)
-	srv := httptest.NewServer(NewRouter(audience.NewService(repo), notify.NewService(jobs), tokens, testAdminKey))
+	repo, jobs, prom := audiencetest.NewMockRepository(ctrl), notifytest.NewMockRepository(ctrl), insighttest.NewMockQuerier(ctrl)
+	srv := httptest.NewServer(NewRouter(audience.NewService(repo), notify.NewService(jobs), insight.NewService(prom), tokens, testAdminKey))
 	t.Cleanup(srv.Close)
-	return client{baseURL: srv.URL, token: tok}, mocks{audience: repo.EXPECT(), jobs: jobs.EXPECT()}
+	return client{baseURL: srv.URL, token: tok}, mocks{audience: repo.EXPECT(), jobs: jobs.EXPECT(), prom: prom.EXPECT()}
 }
 
 func TestStatus(t *testing.T) {
