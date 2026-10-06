@@ -18,6 +18,11 @@ import (
 // These tests need a RabbitMQ broker, such as the one "docker compose up -d rabbitmq"
 // starts, and are skipped unless AMQP_URL points to it.
 
+// testProvider names a provider no worker serves. Workers consume every send queue of
+// their provider, so with the whole system running they would take the messages these
+// tests wait for from the queue of a real one.
+const testProvider = "brokertest"
+
 // newTestClient returns a Client on the test broker and the ID of an app nobody else
 // uses, so that each test works on send queues of its own.
 func newTestClient(t *testing.T) (c *Client, appID string) {
@@ -80,9 +85,9 @@ func receive(t *testing.T, msgs <-chan amqp.Delivery, within time.Duration) amqp
 
 func TestPublishDeliveries(t *testing.T) {
 	c, appID := newTestClient(t)
-	queue := topology.SendQueue("twilio", appID)
+	queue := topology.SendQueue(testProvider, appID)
 	deleteQueue(t, c, queue)
-	want := message.Delivery{MessageID: "j1:e1", JobID: "j1", AppID: appID, Provider: "twilio", Address: "+1", Content: message.Content{Body: "hello"}}
+	want := message.Delivery{MessageID: "j1:e1", JobID: "j1", AppID: appID, Provider: testProvider, Address: "+1", Content: message.Content{Body: "hello"}}
 
 	if err := c.PublishDeliveries(t.Context(), []message.Delivery{want}, notify.PriorityHigh); err != nil {
 		t.Fatalf("PublishDeliveries failed: %v", err)
@@ -109,11 +114,11 @@ func TestPublishDeliveries(t *testing.T) {
 func TestPublishDeliveriesToFullQueueIsRejected(t *testing.T) {
 	c, appID := newTestClient(t)
 	c.maxSendQueueLength = 2
-	deleteQueue(t, c, topology.SendQueue("fcm", appID))
+	deleteQueue(t, c, topology.SendQueue(testProvider, appID))
 
 	deliveries := make([]message.Delivery, 20)
 	for i := range deliveries {
-		deliveries[i] = message.Delivery{MessageID: "m", JobID: "j1", AppID: appID, Provider: "fcm", Address: "token"}
+		deliveries[i] = message.Delivery{MessageID: "m", JobID: "j1", AppID: appID, Provider: testProvider, Address: "token"}
 	}
 	// The limit is enforced loosely: the broker tells publishers that a queue is full
 	// a moment after it fills, so a burst sent before that gets through whole. What
@@ -138,9 +143,9 @@ func TestSendQueueDelaysRejectedDelivery(t *testing.T) {
 		t.Skip("waits for the first retry delay")
 	}
 	c, appID := newTestClient(t)
-	queue := topology.SendQueue("apns", appID)
+	queue := topology.SendQueue(testProvider, appID)
 	deleteQueue(t, c, queue)
-	d := message.Delivery{MessageID: "j1:e1", JobID: "j1", AppID: appID, Provider: "apns", Address: "token"}
+	d := message.Delivery{MessageID: "j1:e1", JobID: "j1", AppID: appID, Provider: testProvider, Address: "token"}
 	if err := c.PublishDeliveries(t.Context(), []message.Delivery{d}, notify.PriorityHigh); err != nil {
 		t.Fatalf("Setup: PublishDeliveries failed: %v", err)
 	}
